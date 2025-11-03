@@ -24,7 +24,8 @@ class PlayerController extends ChangeNotifier {
   final _statusController = StreamController<String>.broadcast();
   String _url = kDefaultStreamUrl;
   bool _autoConnect = true;
-  bool _usePcm = false;
+  bool _usePcm = true;
+  String? _pcmStatus;
   bool _isConnecting = false;
   int _retryAttempt = 0;
   Timer? _retryTimer;
@@ -35,11 +36,13 @@ class PlayerController extends ChangeNotifier {
   bool get autoConnect => _autoConnect;
   bool get usePcm => _usePcm;
   bool get isConnecting => _isConnecting;
+  String? get pcmStatus => _pcmStatus;
 
   Future<void> loadPrefs() async {
     final prefs = await SharedPreferences.getInstance();
     _url = prefs.getString('stream_url') ?? kDefaultStreamUrl;
     _autoConnect = prefs.getBool('auto_connect') ?? true;
+    _usePcm = prefs.getBool('use_pcm') ?? true;
     notifyListeners();
   }
 
@@ -47,6 +50,7 @@ class PlayerController extends ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('stream_url', _url);
     await prefs.setBool('auto_connect', _autoConnect);
+    await prefs.setBool('use_pcm', _usePcm);
   }
 
   void setUrl(String newUrl) {
@@ -62,11 +66,21 @@ class PlayerController extends ChangeNotifier {
 
   void setUsePcm(bool value) {
     _usePcm = value;
+    savePrefs();
     notifyListeners();
   }
 
   Future<void> init() async {
     await loadPrefs();
+    _pcmChannel.setMethodCallHandler((call) async {
+      if (call.method == 'pcmEvent') {
+        final args = call.arguments as Map?;
+        final type = args?['type'] as String?;
+        final msg = args?['message'] as String?;
+        _pcmStatus = type == null ? null : (msg == null ? type : ('$type: ' + msg));
+        notifyListeners();
+      }
+    });
     _player.playbackEventStream.listen((event) {}, onError: (e, st) {
       _emitStatus('Error: ${e.toString()}');
       _scheduleReconnect();
@@ -248,6 +262,17 @@ class _HomePageState extends State<HomePage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            if (pc.usePcm)
+              Container(
+                padding: const EdgeInsets.all(8),
+                margin: const EdgeInsets.only(bottom: 8),
+                decoration: BoxDecoration(
+                  color: Colors.green.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(pc.pcmStatus ?? 'PCM mode (foreground service)',
+                    style: const TextStyle(fontWeight: FontWeight.w600)),
+              ),
             Row(
               children: [
                 Switch(value: pc.usePcm, onChanged: (v) => setState(() { pc.setUsePcm(v); })),
@@ -374,6 +399,7 @@ class _Controls extends StatelessWidget {
     );
   }
 }
+
 
 
 
