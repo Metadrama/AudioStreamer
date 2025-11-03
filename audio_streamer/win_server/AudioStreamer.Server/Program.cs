@@ -10,28 +10,42 @@ using Microsoft.Extensions.Hosting;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using Microsoft.AspNetCore.Http.Features;
+using System.Runtime.Versioning;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // Settings
 int port = GetEnvInt("AUDIOSTREAMER_PORT", 7350);
 int pcmPort = GetEnvInt("AUDIOSTREAMER_PCM_PORT", 7352);
-int bitrate = GetEnvInt("AUDIOSTREAMER_BITRATE", 160_000);
-int frameMs = GetEnvInt("AUDIOSTREAMER_FRAME_MS", 40); // 40ms: even fewer packets, more stable
+int bitrate = GetEnvInt("AUDIOSTREAMER_BITRATE", 192_000);
+int frameMs = GetEnvInt("AUDIOSTREAMER_FRAME_MS", 20); // 20ms: lower latency, good stability
 int gainDb = GetEnvInt("AUDIOSTREAMER_GAIN_DB", 0); // fixed preamp in dB (default 0 to avoid distortion)
 bool normalize = GetEnvBool("AUDIOSTREAMER_NORMALIZE", false); // disable boost by default
 int targetPeakDbfs = GetEnvInt("AUDIOSTREAMER_TARGET_PEAK_DBFS", -1); // limiter ceiling
 int maxBoostDb = GetEnvInt("AUDIOSTREAMER_MAX_BOOST_DB", 0); // no auto boost; attenuation only
-int flushIntervalMs = GetEnvInt("AUDIOSTREAMER_FLUSH_INTERVAL_MS", 100); // coalesce writes
+int flushIntervalMs = GetEnvInt("AUDIOSTREAMER_FLUSH_INTERVAL_MS", 40); // slightly larger to smooth bursts
+bool opusUseVbr = GetEnvBool("AUDIOSTREAMER_OPUS_USE_VBR", false); // default CBR to avoid burstiness
+bool opusVbrConstrained = GetEnvBool("AUDIOSTREAMER_OPUS_VBR_CONSTRAINED", true); // reduce VBR bursts
+int opusComplexity = GetEnvInt("AUDIOSTREAMER_OPUS_COMPLEXITY", 10); // 0..10
+bool opusRestrictedLowDelay = GetEnvBool("AUDIOSTREAMER_OPUS_RESTRICTED_LOWDELAY", false); // trade quality for latency
 bool singleClient = GetEnvBool("AUDIOSTREAMER_SINGLE_CLIENT", true);
 bool autoAdbReverse = GetEnvBool("AUDIOSTREAMER_ADB_REVERSE", true);
 
-builder.Services.AddSingleton(new ServerConfig(port, pcmPort, bitrate, frameMs, singleClient, autoAdbReverse, gainDb, normalize, targetPeakDbfs, maxBoostDb, flushIntervalMs));
+builder.Services.AddSingleton(new ServerConfig(port, pcmPort, bitrate, frameMs, singleClient, autoAdbReverse, gainDb, normalize, targetPeakDbfs, maxBoostDb, flushIntervalMs,
+    opusUseVbr, opusVbrConstrained, opusComplexity, opusRestrictedLowDelay));
 builder.Services.AddSingleton<CaptureManager>();
 builder.Services.AddHostedService<AdbReverseService>();
 builder.Services.AddHostedService<PcmTcpServerService>();
 
 var app = builder.Build();
+
+// Improve Windows timer resolution to reduce scheduling jitter
+try
+{
+    WinMM.TimeBeginPeriod(1);
+    try { Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.High; } catch { }
+}
+catch { }
 
 app.MapGet("/", () => Results.Text("AudioStreamer.Server running. GET /stream.opus for audio."));
 
@@ -91,6 +105,12 @@ app.Lifetime.ApplicationStarted.Register(() =>
     Console.WriteLine("Tip: adb reverse tcp:7352 tcp:7352");
 });
 
+// Restore timer resolution on shutdown
+app.Lifetime.ApplicationStopping.Register(() =>
+{
+    try { WinMM.TimeEndPeriod(1); } catch { }
+});
+
 app.Urls.Clear();
 app.Urls.Add($"http://127.0.0.1:{port}");
 
@@ -99,12 +119,24 @@ await app.RunAsync();
 static int GetEnvInt(string key, int def) => int.TryParse(Environment.GetEnvironmentVariable(key), out var v) ? v : def;
 static bool GetEnvBool(string key, bool def) => bool.TryParse(Environment.GetEnvironmentVariable(key), out var v) ? v : def;
 
-record ServerConfig(int Port, int PcmPort, int Bitrate, int FrameMs, bool SingleClient, bool AutoAdbReverse, int GainDb, bool Normalize, int TargetPeakDbfs, int MaxBoostDb, int FlushIntervalMs)
+record ServerConfig(int Port, int PcmPort, int Bitrate, int FrameMs, bool SingleClient, bool AutoAdbReverse, int GainDb, bool Normalize, int TargetPeakDbfs, int MaxBoostDb, int FlushIntervalMs,
+    bool OpusUseVbr, bool OpusVbrConstrained, int OpusComplexity, bool OpusRestrictedLowDelay)
 {
     public int SamplesPerFrame => 48000 * FrameMs / 1000; // e.g., 960 for 20ms
     public float GainLinear => (float)Math.Pow(10.0, GainDb / 20.0);
     public float TargetPeakLinear => (float)Math.Pow(10.0, TargetPeakDbfs / 20.0); // e.g., -3 dBFS ≈ 0.7079
     public float MaxBoostLinear => (float)Math.Pow(10.0, MaxBoostDb / 20.0);
+}
+
+static class WinMM
+{
+    [DllImport("winmm.dll")]
+    public static extern uint timeBeginPeriod(uint uMilliseconds);
+    [DllImport("winmm.dll")]
+    public static extern uint timeEndPeriod(uint uMilliseconds);
+
+    public static void TimeBeginPeriod(uint ms) => timeBeginPeriod(ms);
+    public static void TimeEndPeriod(uint ms) => timeEndPeriod(ms);
 }
 
 class CaptureManager
@@ -118,6 +150,7 @@ class CaptureManager
 
     public async Task StreamToAsync(Stream output, CancellationToken ct)
     {
+        try { System.Threading.Thread.CurrentThread.Priority = System.Threading.ThreadPriority.AboveNormal; } catch { }
         using var mm = new MMDeviceEnumerator();
         using var device = mm.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
         using var capture = new WasapiLoopbackCapture(device);
@@ -130,7 +163,8 @@ class CaptureManager
         var buffered = new BufferedWaveProvider(capture.WaveFormat)
         {
             DiscardOnBufferOverflow = true,
-            BufferDuration = TimeSpan.FromMilliseconds(2000)
+            BufferDuration = TimeSpan.FromMilliseconds(200), // keep small to avoid buildup
+            ReadFully = false
         };
 
         capture.DataAvailable += (s, a) =>
@@ -159,11 +193,15 @@ class CaptureManager
         int samplesPerFrame = _cfg.SamplesPerFrame; // per channel
         int frameSamplesInterleaved = samplesPerFrame * 2;
 
-        var enc = new Concentus.Structs.OpusEncoder(48000, 2, Concentus.Enums.OpusApplication.OPUS_APPLICATION_AUDIO);
+        var application = _cfg.OpusRestrictedLowDelay ? Concentus.Enums.OpusApplication.OPUS_APPLICATION_RESTRICTED_LOWDELAY
+                                                      : Concentus.Enums.OpusApplication.OPUS_APPLICATION_AUDIO;
+        var enc = new Concentus.Structs.OpusEncoder(48000, 2, application);
         enc.Bitrate = _cfg.Bitrate;
-        enc.UseVBR = true;
+        enc.UseVBR = _cfg.OpusUseVbr;
         enc.MaxBandwidth = Concentus.Enums.OpusBandwidth.OPUS_BANDWIDTH_FULLBAND;
-        enc.Complexity = 8; // higher quality without big latency impact
+        enc.Complexity = Math.Clamp(_cfg.OpusComplexity, 0, 10);
+        // If available in newer Concentus, we can set SignalType and VBR constraints
+        // Keep defaults here for compatibility. Avoid in-band FEC for minimal latency.
 
         using var bufferedOut = new BufferedStream(output, 16384);
         using var ogg = new OggOpusStreamWriter(bufferedOut, 48000, 2);
@@ -171,6 +209,9 @@ class CaptureManager
 
         var floatBuf = new float[frameSamplesInterleaved];
         var shortBuf = new short[frameSamplesInterleaved];
+        var maxPacket = 4096; // sufficient for stereo @ 20ms
+        var packet = new byte[maxPacket];
+        float lastL = 0f, lastR = 0f;
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
         long lastFlushMs = 0;
@@ -180,16 +221,28 @@ class CaptureManager
             while (!ct.IsCancellationRequested)
             {
                 int read = 0;
+                int zeroReads = 0;
                 while (read < floatBuf.Length && !ct.IsCancellationRequested)
                 {
                     int n = sampleProvider.Read(floatBuf, read, floatBuf.Length - read);
                     if (n == 0)
                     {
-                        // Fill remainder with silence to avoid decoder under-runs
-                        Array.Clear(floatBuf, read, floatBuf.Length - read);
+                        if (zeroReads < 5)
+                        {
+                            zeroReads++;
+                            await Task.Delay(1, ct); // short wait to avoid padding with silence
+                            continue;
+                        }
+                        // After short grace, pad remainder with last sample to avoid clicks
+                        for (int i = read; i < floatBuf.Length; i += 2)
+                        {
+                            floatBuf[i] = lastL;
+                            floatBuf[i + 1] = lastR;
+                        }
                         read = floatBuf.Length;
                         break;
                     }
+                    zeroReads = 0;
                     read += n;
                 }
                 if (ct.IsCancellationRequested) break;
@@ -221,10 +274,11 @@ class CaptureManager
                     if (v < short.MinValue) v = short.MinValue;
                     shortBuf[i] = (short)v;
                 }
+                // Track last sample to smooth underrun padding
+                lastL = floatBuf[floatBuf.Length - 2];
+                lastR = floatBuf[floatBuf.Length - 1];
 
                 // Encode to Opus
-                var maxPacket = 4000; // ample for 20ms stereo @ 160kbps
-                var packet = new byte[maxPacket];
                 int encoded = enc.Encode(shortBuf, 0, samplesPerFrame, packet, 0, packet.Length);
                 if (encoded > 0)
                 {
@@ -401,6 +455,7 @@ class PcmTcpServerService : BackgroundService
 
     private async Task StreamPcmAsync(Stream output, CancellationToken ct)
     {
+        try { System.Threading.Thread.CurrentThread.Priority = System.Threading.ThreadPriority.AboveNormal; } catch { }
         using var mm = new MMDeviceEnumerator();
         using var device = mm.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
         using var capture = new WasapiLoopbackCapture(device);
@@ -408,7 +463,8 @@ class PcmTcpServerService : BackgroundService
         var buffered = new BufferedWaveProvider(capture.WaveFormat)
         {
             DiscardOnBufferOverflow = true,
-            BufferDuration = TimeSpan.FromMilliseconds(200)
+            BufferDuration = TimeSpan.FromMilliseconds(50),
+            ReadFully = false
         };
         capture.DataAvailable += (s, a) => buffered.AddSamples(a.Buffer, 0, a.BytesRecorded);
         capture.StartRecording();
@@ -429,20 +485,33 @@ class PcmTcpServerService : BackgroundService
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
         long due = sw.ElapsedMilliseconds;
+        float lastL = 0f, lastR = 0f;
         try
         {
             while (!ct.IsCancellationRequested)
             {
                 int read = 0;
+                int zeroReads = 0;
                 while (read < floatBuf.Length && !ct.IsCancellationRequested)
                 {
                     int n = sampleProvider.Read(floatBuf, read, floatBuf.Length - read);
                     if (n == 0)
                     {
-                        Array.Clear(floatBuf, read, floatBuf.Length - read);
+                        if (zeroReads < 3)
+                        {
+                            zeroReads++;
+                            await Task.Delay(1, ct);
+                            continue;
+                        }
+                        for (int i = read; i < floatBuf.Length; i += 2)
+                        {
+                            floatBuf[i] = lastL;
+                            floatBuf[i + 1] = lastR;
+                        }
                         read = floatBuf.Length;
                         break;
                     }
+                    zeroReads = 0;
                     read += n;
                 }
 
@@ -468,6 +537,8 @@ class PcmTcpServerService : BackgroundService
                     shortBuf[i] = v;
                 }
                 Buffer.BlockCopy(shortBuf, 0, byteBuf, 0, byteBuf.Length);
+                lastL = floatBuf[floatBuf.Length - 2];
+                lastR = floatBuf[floatBuf.Length - 1];
                 await output.WriteAsync(byteBuf, 0, byteBuf.Length, ct);
                 await output.FlushAsync(ct);
 
@@ -493,6 +564,7 @@ sealed class OggOpusStreamWriter : IDisposable
     private uint _seq;
     private long _granule;
     private bool _disposed;
+    private readonly ArrayPool<byte> _pool = ArrayPool<byte>.Shared;
 
     public OggOpusStreamWriter(Stream output, int sampleRate, int channels)
     {
@@ -528,82 +600,91 @@ sealed class OggOpusStreamWriter : IDisposable
 
     private void WriteOpusHead()
     {
-        var ms = new MemoryStream();
-        var bw = new BinaryWriter(ms);
-        bw.Write(System.Text.Encoding.ASCII.GetBytes("OpusHead"));
-        bw.Write((byte)1); // version
-        bw.Write((byte)_channels);
-        bw.Write((ushort)0); // pre-skip
-        bw.Write((uint)_rate);
-        bw.Write((short)0); // output gain
-        bw.Write((byte)0); // mapping family (0 = single stream)
-        bw.Flush();
-        WriteOggPage(ms.ToArray(), (int)ms.Length, 0x02, 0); // BOS
-        _out.Flush();
+        var payload = _pool.Rent(19);
+        try
+        {
+            var span = payload.AsSpan(0, 19);
+            WriteAscii(span, 0, "OpusHead");
+            span[8] = 1; // version
+            span[9] = (byte)_channels;
+            WriteLE16(span, 10, 0); // pre-skip
+            WriteLE32(span, 12, (uint)_rate);
+            WriteLE16(span, 16, 0); // output gain
+            span[18] = 0; // mapping family
+            WriteOggPage(payload, 19, 0x02, 0); // BOS
+            _out.Flush();
+        }
+        finally { _pool.Return(payload); }
     }
 
     private void WriteOpusTags()
     {
-        var vendor = System.Text.Encoding.UTF8.GetBytes("AudioStreamer.Server");
-        var ms = new MemoryStream();
-        var bw = new BinaryWriter(ms);
-        bw.Write(System.Text.Encoding.ASCII.GetBytes("OpusTags"));
-        bw.Write((uint)vendor.Length);
-        bw.Write(vendor);
-        bw.Write((uint)0); // user comment list length
-        bw.Flush();
-        WriteOggPage(ms.ToArray(), (int)ms.Length, 0x00, 0);
-        _out.Flush();
+        var vendorBytes = System.Text.Encoding.UTF8.GetBytes("AudioStreamer.Server");
+        int payloadLen = 8 + 4 + vendorBytes.Length + 4;
+        var payload = _pool.Rent(payloadLen);
+        try
+        {
+            var span = payload.AsSpan(0, payloadLen);
+            WriteAscii(span, 0, "OpusTags");
+            WriteLE32(span, 8, (uint)vendorBytes.Length);
+            vendorBytes.AsSpan().CopyTo(span.Slice(12, vendorBytes.Length));
+            WriteLE32(span, 12 + vendorBytes.Length, 0);
+            WriteOggPage(payload, payloadLen, 0x00, 0);
+            _out.Flush();
+        }
+        finally { _pool.Return(payload); }
     }
 
     private void WriteOggPage(byte[] payload, int payloadLen, byte headerType, long granulePos, bool terminatePacket = false)
     {
-        // Build segment table
-        var segs = new List<byte>(Math.Max(1, (payloadLen + 254) / 255) + 1);
-        int remaining = payloadLen;
-        int payloadOffset = 0;
-        while (remaining > 0)
-        {
-            int seg = Math.Min(255, remaining);
-            segs.Add((byte)seg);
-            remaining -= seg;
-        }
-        // Ensure packet termination within the page: if the last lacing value == 255,
-        // add a zero-length segment to mark end-of-packet (avoids implicit continuation).
-        if (terminatePacket && segs.Count > 0 && segs[segs.Count - 1] == 255)
-        {
-            segs.Add(0);
-        }
+        int segCount = (payloadLen + 254) / 255;
+        if (terminatePacket && segCount > 0 && (payloadLen % 255 == 0)) segCount += 1;
 
-        using var page = new MemoryStream();
-        var bw = new BinaryWriter(page);
-        // Header
-        bw.Write(System.Text.Encoding.ASCII.GetBytes("OggS"));
-        bw.Write((byte)0); // version
-        bw.Write(headerType); // header type
-        bw.Write(granulePos);
-        bw.Write(_serial);
-        bw.Write(_seq++);
-        bw.Write((uint)0); // checksum placeholder
-        bw.Write((byte)segs.Count);
-        bw.Write(segs.ToArray());
-        // Body
-        bw.Write(payload, payloadOffset, payloadLen);
-        bw.Flush();
-
-        // Compute and set checksum
-        var arr = page.ToArray();
-        SetChecksum(arr);
-        _out.Write(arr, 0, arr.Length);
+        int headerLen = 27 + segCount;
+        int totalLen = headerLen + payloadLen;
+        var arr = _pool.Rent(totalLen);
+        try
+        {
+            var span = arr.AsSpan(0, totalLen);
+            // Header
+            WriteAscii(span, 0, "OggS");
+            span[4] = 0; // version
+            span[5] = headerType; // header type
+            WriteLE64(span, 6, (ulong)granulePos);
+            WriteLE32(span, 14, _serial);
+            WriteLE32(span, 18, (uint)_seq++);
+            WriteLE32(span, 22, 0); // checksum placeholder
+            span[26] = (byte)segCount;
+            // Lacing
+            int off = 27;
+            int remaining = payloadLen;
+            while (remaining > 0)
+            {
+                int seg = Math.Min(255, remaining);
+                span[off++] = (byte)seg;
+                remaining -= seg;
+            }
+            if (terminatePacket && (payloadLen % 255 == 0))
+            {
+                span[off++] = 0;
+            }
+            // Body
+            payload.AsSpan(0, payloadLen).CopyTo(span.Slice(off, payloadLen));
+            // CRC over totalLen
+            SetChecksum(arr, totalLen);
+            _out.Write(arr, 0, totalLen);
+        }
+        finally { _pool.Return(arr); }
     }
 
-    private static void SetChecksum(byte[] page)
+    private static void SetChecksum(byte[] page, int length)
     {
         // CRC is at offset 22
         page[22] = page[23] = page[24] = page[25] = 0;
         uint crc = 0;
-        foreach (var b in page)
+        for (int i = 0; i < length; i++)
         {
+            byte b = page[i];
             crc = (crc << 8) ^ CrcTable[((crc >> 24) ^ b) & 0xFF];
         }
         page[22] = (byte)(crc & 0xFF);
@@ -630,5 +711,34 @@ sealed class OggOpusStreamWriter : IDisposable
             table[i] = r;
         }
         return table;
+    }
+
+    private static void WriteAscii(Span<byte> span, int offset, string text)
+    {
+        var bytes = System.Text.Encoding.ASCII.GetBytes(text);
+        bytes.AsSpan().CopyTo(span.Slice(offset, bytes.Length));
+    }
+    private static void WriteLE16(Span<byte> span, int offset, ushort value)
+    {
+        span[offset] = (byte)(value & 0xFF);
+        span[offset + 1] = (byte)((value >> 8) & 0xFF);
+    }
+    private static void WriteLE32(Span<byte> span, int offset, uint value)
+    {
+        span[offset] = (byte)(value & 0xFF);
+        span[offset + 1] = (byte)((value >> 8) & 0xFF);
+        span[offset + 2] = (byte)((value >> 16) & 0xFF);
+        span[offset + 3] = (byte)((value >> 24) & 0xFF);
+    }
+    private static void WriteLE64(Span<byte> span, int offset, ulong value)
+    {
+        span[offset] = (byte)(value & 0xFF);
+        span[offset + 1] = (byte)((value >> 8) & 0xFF);
+        span[offset + 2] = (byte)((value >> 16) & 0xFF);
+        span[offset + 3] = (byte)((value >> 24) & 0xFF);
+        span[offset + 4] = (byte)((value >> 32) & 0xFF);
+        span[offset + 5] = (byte)((value >> 40) & 0xFF);
+        span[offset + 6] = (byte)((value >> 48) & 0xFF);
+        span[offset + 7] = (byte)((value >> 56) & 0xFF);
     }
 }
