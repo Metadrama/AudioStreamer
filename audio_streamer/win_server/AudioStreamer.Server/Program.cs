@@ -11,28 +11,34 @@ using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using Microsoft.AspNetCore.Http.Features;
 using System.Runtime.Versioning;
+using System.Text.Json;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // Settings
 int port = GetEnvInt("AUDIOSTREAMER_PORT", 7350);
 int pcmPort = GetEnvInt("AUDIOSTREAMER_PCM_PORT", 7352);
-int bitrate = GetEnvInt("AUDIOSTREAMER_BITRATE", 192_000);
-int frameMs = GetEnvInt("AUDIOSTREAMER_FRAME_MS", 20); // 20ms: lower latency, good stability
-int gainDb = GetEnvInt("AUDIOSTREAMER_GAIN_DB", 0); // fixed preamp in dB (default 0 to avoid distortion)
-bool normalize = GetEnvBool("AUDIOSTREAMER_NORMALIZE", false); // disable boost by default
-int targetPeakDbfs = GetEnvInt("AUDIOSTREAMER_TARGET_PEAK_DBFS", -1); // limiter ceiling
-int maxBoostDb = GetEnvInt("AUDIOSTREAMER_MAX_BOOST_DB", 0); // no auto boost; attenuation only
-int flushIntervalMs = GetEnvInt("AUDIOSTREAMER_FLUSH_INTERVAL_MS", 40); // slightly larger to smooth bursts
-bool opusUseVbr = GetEnvBool("AUDIOSTREAMER_OPUS_USE_VBR", false); // default CBR to avoid burstiness
-bool opusVbrConstrained = GetEnvBool("AUDIOSTREAMER_OPUS_VBR_CONSTRAINED", true); // reduce VBR bursts
-int opusComplexity = GetEnvInt("AUDIOSTREAMER_OPUS_COMPLEXITY", 10); // 0..10
-bool opusRestrictedLowDelay = GetEnvBool("AUDIOSTREAMER_OPUS_RESTRICTED_LOWDELAY", false); // trade quality for latency
-bool singleClient = GetEnvBool("AUDIOSTREAMER_SINGLE_CLIENT", true);
-bool autoAdbReverse = GetEnvBool("AUDIOSTREAMER_ADB_REVERSE", true);
+var liveConfig = new MutableConfig
+{
+    Port = port,
+    PcmPort = pcmPort,
+    Bitrate = GetEnvInt("AUDIOSTREAMER_BITRATE", 320_000),
+    FrameMs = GetEnvInt("AUDIOSTREAMER_FRAME_MS", 20),
+    GainDb = GetEnvInt("AUDIOSTREAMER_GAIN_DB", 0),
+    Normalize = GetEnvBool("AUDIOSTREAMER_NORMALIZE", false),
+    TargetPeakDbfs = GetEnvInt("AUDIOSTREAMER_TARGET_PEAK_DBFS", -1),
+    MaxBoostDb = GetEnvInt("AUDIOSTREAMER_MAX_BOOST_DB", 0),
+    FlushIntervalMs = GetEnvInt("AUDIOSTREAMER_FLUSH_INTERVAL_MS", 40),
+    OpusUseVbr = GetEnvBool("AUDIOSTREAMER_OPUS_USE_VBR", false),
+    OpusVbrConstrained = GetEnvBool("AUDIOSTREAMER_OPUS_VBR_CONSTRAINED", true),
+    OpusComplexity = GetEnvInt("AUDIOSTREAMER_OPUS_COMPLEXITY", 10),
+    OpusRestrictedLowDelay = GetEnvBool("AUDIOSTREAMER_OPUS_RESTRICTED_LOWDELAY", false),
+    SingleClient = GetEnvBool("AUDIOSTREAMER_SINGLE_CLIENT", true),
+    AutoAdbReverse = GetEnvBool("AUDIOSTREAMER_ADB_REVERSE", true),
+    DeviceId = Environment.GetEnvironmentVariable("AUDIOSTREAMER_DEVICE_ID") ?? string.Empty,
+};
 
-builder.Services.AddSingleton(new ServerConfig(port, pcmPort, bitrate, frameMs, singleClient, autoAdbReverse, gainDb, normalize, targetPeakDbfs, maxBoostDb, flushIntervalMs,
-    opusUseVbr, opusVbrConstrained, opusComplexity, opusRestrictedLowDelay));
+builder.Services.AddSingleton(liveConfig);
 builder.Services.AddSingleton<CaptureManager>();
 builder.Services.AddHostedService<AdbReverseService>();
 builder.Services.AddHostedService<PcmTcpServerService>();
@@ -47,12 +53,12 @@ try
 }
 catch { }
 
-app.MapGet("/", () => Results.Text("AudioStreamer.Server running. GET /stream.opus for audio."));
+app.MapGet("/", () => Results.Text("AudioStreamer.Server running. GET /stream.opus for audio. POST /config to adjust."));
 
 var connectionLock = new object();
 bool clientConnected = false;
 
-app.MapGet("/stream.opus", async (HttpContext ctx, CaptureManager cap, ServerConfig cfg) =>
+app.MapGet("/stream.opus", async (HttpContext ctx, CaptureManager cap, MutableConfig live) =>
 {
     ctx.Response.StatusCode = 200;
     ctx.Response.Headers["Content-Type"] = "application/ogg; codecs=opus";
@@ -61,7 +67,7 @@ app.MapGet("/stream.opus", async (HttpContext ctx, CaptureManager cap, ServerCon
     var bodyCtrl = ctx.Features.Get<IHttpBodyControlFeature>();
     if (bodyCtrl != null) bodyCtrl.AllowSynchronousIO = true;
 
-    if (cfg.SingleClient)
+    if (live.SingleClient)
     {
         lock (connectionLock)
         {
@@ -77,7 +83,7 @@ app.MapGet("/stream.opus", async (HttpContext ctx, CaptureManager cap, ServerCon
     var abortToken = ctx.RequestAborted;
     try
     {
-        await cap.StreamToAsync(ctx.Response.Body, abortToken);
+        await cap.StreamToAsync(ctx.Response.Body, live.Snapshot(), abortToken);
     }
     catch (OperationCanceledException)
     {
@@ -89,7 +95,7 @@ app.MapGet("/stream.opus", async (HttpContext ctx, CaptureManager cap, ServerCon
     }
     finally
     {
-        if (cfg.SingleClient)
+        if (live.SingleClient)
         {
             lock (connectionLock) clientConnected = false;
         }
@@ -97,10 +103,63 @@ app.MapGet("/stream.opus", async (HttpContext ctx, CaptureManager cap, ServerCon
     }
 });
 
+// Simple JSON config endpoints
+app.MapGet("/config", (MutableConfig cfg) => Results.Json(cfg.ToDto()));
+
+app.MapGet("/devices", () =>
+{
+    var list = new List<object>();
+    using var mm = new MMDeviceEnumerator();
+    MMDevice? defMultimedia = null;
+    MMDevice? defComm = null;
+    try { defMultimedia = mm.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia); } catch { }
+    try { defComm = mm.GetDefaultAudioEndpoint(DataFlow.Render, Role.Communications); } catch { }
+    foreach (var d in mm.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.All))
+    {
+        list.Add(new
+        {
+            id = d.ID,
+            name = d.FriendlyName,
+            state = d.State.ToString(),
+            isDefault = (defMultimedia != null && d.ID == defMultimedia.ID),
+            isDefaultComm = (defComm != null && d.ID == defComm.ID)
+        });
+    }
+    return Results.Json(list);
+});
+
+app.MapPost("/config", async (HttpContext ctx, MutableConfig cfg) =>
+{
+    try
+    {
+        using var doc = await JsonDocument.ParseAsync(ctx.Request.Body, cancellationToken: ctx.RequestAborted);
+        var root = doc.RootElement;
+        var upd = new MutableConfig.ConfigUpdate();
+        if (root.TryGetProperty("bitrate", out var br) && br.TryGetInt32(out var brv)) upd.Bitrate = brv;
+        if (root.TryGetProperty("frame_ms", out var fm) && fm.TryGetInt32(out var fmv)) upd.FrameMs = fmv;
+        if (root.TryGetProperty("flush_ms", out var fl) && fl.TryGetInt32(out var flv)) upd.FlushIntervalMs = flv;
+        if (root.TryGetProperty("opus_use_vbr", out var uv) && (uv.ValueKind == JsonValueKind.True || uv.ValueKind == JsonValueKind.False)) upd.OpusUseVbr = uv.GetBoolean();
+        if (root.TryGetProperty("opus_rld", out var rld) && (rld.ValueKind == JsonValueKind.True || rld.ValueKind == JsonValueKind.False)) upd.OpusRestrictedLowDelay = rld.GetBoolean();
+        if (root.TryGetProperty("opus_complexity", out var cx) && cx.TryGetInt32(out var cxv)) upd.OpusComplexity = cxv;
+        if (root.TryGetProperty("gain_db", out var gd) && gd.TryGetInt32(out var gdv)) upd.GainDb = gdv;
+        if (root.TryGetProperty("target_peak_dbfs", out var tp) && tp.TryGetInt32(out var tpv)) upd.TargetPeakDbfs = tpv;
+        if (root.TryGetProperty("max_boost_db", out var mb) && mb.TryGetInt32(out var mbv)) upd.MaxBoostDb = mbv;
+        if (root.TryGetProperty("single_client", out var sc) && (sc.ValueKind == JsonValueKind.True || sc.ValueKind == JsonValueKind.False)) upd.SingleClient = sc.GetBoolean();
+        if (root.TryGetProperty("device_id", out var did) && did.ValueKind == JsonValueKind.String) upd.DeviceId = did.GetString();
+
+        cfg.Apply(upd);
+        return Results.Json(cfg.ToDto());
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(ex.Message);
+    }
+});
+
 app.Lifetime.ApplicationStarted.Register(() =>
 {
-    Console.WriteLine($"AudioStreamer.Server listening on http://127.0.0.1:{port}/stream.opus");
-    Console.WriteLine($"PCM (ultra-low-latency) on tcp://127.0.0.1:{pcmPort}");
+    Console.WriteLine($"AudioStreamer.Server listening on http://127.0.0.1:{liveConfig.Port}/stream.opus");
+    Console.WriteLine($"PCM (ultra-low-latency) on tcp://127.0.0.1:{liveConfig.PcmPort}");
     Console.WriteLine("Tip: adb reverse tcp:7350 tcp:7350");
     Console.WriteLine("Tip: adb reverse tcp:7352 tcp:7352");
 });
@@ -119,8 +178,98 @@ await app.RunAsync();
 static int GetEnvInt(string key, int def) => int.TryParse(Environment.GetEnvironmentVariable(key), out var v) ? v : def;
 static bool GetEnvBool(string key, bool def) => bool.TryParse(Environment.GetEnvironmentVariable(key), out var v) ? v : def;
 
+// Mutable config for runtime preferences; snapshot when starting streams
+class MutableConfig
+{
+    private readonly object _lock = new object();
+    public int Port { get; set; }
+    public int PcmPort { get; set; }
+    public int Bitrate { get; set; }
+    public int FrameMs { get; set; }
+    public int GainDb { get; set; }
+    public bool Normalize { get; set; }
+    public int TargetPeakDbfs { get; set; }
+    public int MaxBoostDb { get; set; }
+    public int FlushIntervalMs { get; set; }
+    public bool OpusUseVbr { get; set; }
+    public bool OpusVbrConstrained { get; set; }
+    public int OpusComplexity { get; set; }
+    public bool OpusRestrictedLowDelay { get; set; }
+    public bool SingleClient { get; set; }
+    public bool AutoAdbReverse { get; set; }
+    public string DeviceId { get; set; } = string.Empty;
+
+    public ServerConfig Snapshot()
+    {
+        lock (_lock)
+        {
+            return new ServerConfig(Port, PcmPort, Bitrate, FrameMs, SingleClient, AutoAdbReverse, GainDb, Normalize, TargetPeakDbfs, MaxBoostDb, FlushIntervalMs,
+                OpusUseVbr, OpusVbrConstrained, OpusComplexity, OpusRestrictedLowDelay, DeviceId);
+        }
+    }
+
+    public record ConfigDto(int Port, int PcmPort, int Bitrate, int FrameMs, int FlushIntervalMs, bool OpusUseVbr, int OpusComplexity, bool OpusRestrictedLowDelay, int GainDb, int TargetPeakDbfs, int MaxBoostDb, bool SingleClient, string DeviceId);
+    public ConfigDto ToDto()
+    {
+        lock (_lock)
+        {
+            return new ConfigDto(Port, PcmPort, Bitrate, FrameMs, FlushIntervalMs, OpusUseVbr, OpusComplexity, OpusRestrictedLowDelay, GainDb, TargetPeakDbfs, MaxBoostDb, SingleClient, DeviceId);
+        }
+    }
+
+    public class ConfigUpdate
+    {
+        public int? Bitrate { get; set; }
+        public int? FrameMs { get; set; }
+        public int? FlushIntervalMs { get; set; }
+        public bool? OpusUseVbr { get; set; }
+        public bool? OpusRestrictedLowDelay { get; set; }
+        public int? OpusComplexity { get; set; }
+        public int? GainDb { get; set; }
+        public int? TargetPeakDbfs { get; set; }
+        public int? MaxBoostDb { get; set; }
+        public bool? SingleClient { get; set; }
+        public string? DeviceId { get; set; }
+    }
+
+    public void Apply(ConfigDto dto)
+    {
+        lock (_lock)
+        {
+            Bitrate = dto.Bitrate;
+            FrameMs = dto.FrameMs;
+            FlushIntervalMs = dto.FlushIntervalMs;
+            OpusUseVbr = dto.OpusUseVbr;
+            OpusComplexity = dto.OpusComplexity;
+            OpusRestrictedLowDelay = dto.OpusRestrictedLowDelay;
+            GainDb = dto.GainDb;
+            TargetPeakDbfs = dto.TargetPeakDbfs;
+            MaxBoostDb = dto.MaxBoostDb;
+            SingleClient = dto.SingleClient;
+            DeviceId = dto.DeviceId;
+        }
+    }
+
+    public void Apply(ConfigUpdate upd)
+    {
+        lock (_lock)
+        {
+            if (upd.Bitrate.HasValue) Bitrate = upd.Bitrate.Value;
+            if (upd.FrameMs.HasValue) FrameMs = upd.FrameMs.Value;
+            if (upd.FlushIntervalMs.HasValue) FlushIntervalMs = upd.FlushIntervalMs.Value;
+            if (upd.OpusUseVbr.HasValue) OpusUseVbr = upd.OpusUseVbr.Value;
+            if (upd.OpusComplexity.HasValue) OpusComplexity = Math.Clamp(upd.OpusComplexity.Value, 0, 10);
+            if (upd.OpusRestrictedLowDelay.HasValue) OpusRestrictedLowDelay = upd.OpusRestrictedLowDelay.Value;
+            if (upd.GainDb.HasValue) GainDb = upd.GainDb.Value;
+            if (upd.TargetPeakDbfs.HasValue) TargetPeakDbfs = upd.TargetPeakDbfs.Value;
+            if (upd.MaxBoostDb.HasValue) MaxBoostDb = upd.MaxBoostDb.Value;
+            if (upd.SingleClient.HasValue) SingleClient = upd.SingleClient.Value;
+            if (upd.DeviceId != null) DeviceId = upd.DeviceId;
+        }
+    }
+}
 record ServerConfig(int Port, int PcmPort, int Bitrate, int FrameMs, bool SingleClient, bool AutoAdbReverse, int GainDb, bool Normalize, int TargetPeakDbfs, int MaxBoostDb, int FlushIntervalMs,
-    bool OpusUseVbr, bool OpusVbrConstrained, int OpusComplexity, bool OpusRestrictedLowDelay)
+    bool OpusUseVbr, bool OpusVbrConstrained, int OpusComplexity, bool OpusRestrictedLowDelay, string DeviceId)
 {
     public int SamplesPerFrame => 48000 * FrameMs / 1000; // e.g., 960 for 20ms
     public float GainLinear => (float)Math.Pow(10.0, GainDb / 20.0);
@@ -141,18 +290,23 @@ static class WinMM
 
 class CaptureManager
 {
-    private readonly ServerConfig _cfg;
+    public CaptureManager() { }
 
-    public CaptureManager(ServerConfig cfg)
-    {
-        _cfg = cfg;
-    }
-
-    public async Task StreamToAsync(Stream output, CancellationToken ct)
+    public async Task StreamToAsync(Stream output, ServerConfig _cfg, CancellationToken ct)
     {
         try { System.Threading.Thread.CurrentThread.Priority = System.Threading.ThreadPriority.AboveNormal; } catch { }
         using var mm = new MMDeviceEnumerator();
-        using var device = mm.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+        MMDevice? devCandidate = null;
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(_cfg.DeviceId))
+            {
+                devCandidate = mm.GetDevice(_cfg.DeviceId);
+            }
+        }
+        catch { devCandidate = null; }
+        using var device = devCandidate ?? mm.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+        Console.WriteLine($"[capture] Using device: {device.FriendlyName} ({device.ID})");
         using var capture = new WasapiLoopbackCapture(device);
 
         if (capture.WaveFormat.SampleRate != 48000 || capture.WaveFormat.Channels != 2)
@@ -361,8 +515,8 @@ class DownmixToStereoSampleProvider : ISampleProvider
 
 class AdbReverseService : BackgroundService
 {
-    private readonly ServerConfig _cfg;
-    public AdbReverseService(ServerConfig cfg) => _cfg = cfg;
+    private readonly MutableConfig _cfg;
+    public AdbReverseService(MutableConfig cfg) => _cfg = cfg;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -408,16 +562,16 @@ class AdbReverseService : BackgroundService
 // Ultra-low-latency PCM over TCP for Android AudioTrack client
 class PcmTcpServerService : BackgroundService
 {
-    private readonly ServerConfig _cfg;
+    private readonly MutableConfig _live;
     private readonly CaptureManager _cap;
-    public PcmTcpServerService(ServerConfig cfg, CaptureManager cap)
+    public PcmTcpServerService(MutableConfig cfg, CaptureManager cap)
     {
-        _cfg = cfg; _cap = cap;
+        _live = cfg; _cap = cap;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, _cfg.PcmPort);
+        var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, _live.PcmPort);
         listener.Server.NoDelay = true;
         listener.Start();
         Console.WriteLine("[pcm] TCP listener started");
@@ -440,7 +594,7 @@ class PcmTcpServerService : BackgroundService
         using var stream = client.GetStream();
         try
         {
-            await StreamPcmAsync(stream, ct);
+            await StreamPcmAsync(stream, _live.Snapshot(), ct);
         }
         catch (Exception ex)
         {
@@ -453,11 +607,21 @@ class PcmTcpServerService : BackgroundService
         }
     }
 
-    private async Task StreamPcmAsync(Stream output, CancellationToken ct)
+    private async Task StreamPcmAsync(Stream output, ServerConfig _cfg, CancellationToken ct)
     {
         try { System.Threading.Thread.CurrentThread.Priority = System.Threading.ThreadPriority.AboveNormal; } catch { }
         using var mm = new MMDeviceEnumerator();
-        using var device = mm.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+        MMDevice? devCandidate = null;
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(_cfg.DeviceId))
+            {
+                devCandidate = mm.GetDevice(_cfg.DeviceId);
+            }
+        }
+        catch { devCandidate = null; }
+        using var device = devCandidate ?? mm.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+        Console.WriteLine($"[pcm] Using device: {device.FriendlyName} ({device.ID})");
         using var capture = new WasapiLoopbackCapture(device);
 
         var buffered = new BufferedWaveProvider(capture.WaveFormat)

@@ -4,6 +4,8 @@ import 'package:flutter/services.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert' as convert;
 
 const String kDefaultStreamUrl = 'http://127.0.0.1:7350/stream.opus';
 
@@ -13,10 +15,10 @@ class PlayerController extends ChangeNotifier {
   final AudioPlayer _player = AudioPlayer(
     audioLoadConfiguration: AudioLoadConfiguration(
       androidLoadControl: AndroidLoadControl(
-        minBufferDuration: const Duration(milliseconds: 150),
-        maxBufferDuration: const Duration(milliseconds: 600),
-        bufferForPlaybackDuration: const Duration(milliseconds: 75),
-        bufferForPlaybackAfterRebufferDuration: const Duration(milliseconds: 150),
+        minBufferDuration: const Duration(milliseconds: 200),
+        maxBufferDuration: const Duration(milliseconds: 800),
+        bufferForPlaybackDuration: const Duration(milliseconds: 80),
+        bufferForPlaybackAfterRebufferDuration: const Duration(milliseconds: 160),
         prioritizeTimeOverSizeThresholds: true,
       ),
     ),
@@ -29,6 +31,14 @@ class PlayerController extends ChangeNotifier {
   bool _isConnecting = false;
   int _retryAttempt = 0;
   Timer? _retryTimer;
+  Timer? _healthTimer;
+  // Preferences for server
+  int _prefBitrate = 320000;
+  int _prefFrameMs = 20;
+  int _prefFlushMs = 40;
+  String? _prefDeviceId;
+  List<Map<String, dynamic>> _devices = const [];
+  DateTime _lastPcmStart = DateTime.fromMillisecondsSinceEpoch(0);
 
   Stream<String> get statusStream => _statusController.stream;
   AudioPlayer get player => _player;
@@ -37,12 +47,21 @@ class PlayerController extends ChangeNotifier {
   bool get usePcm => _usePcm;
   bool get isConnecting => _isConnecting;
   String? get pcmStatus => _pcmStatus;
+  int get prefBitrate => _prefBitrate;
+  int get prefFrameMs => _prefFrameMs;
+  int get prefFlushMs => _prefFlushMs;
+  String? get prefDeviceId => _prefDeviceId;
+  List<Map<String, dynamic>> get devices => _devices;
 
   Future<void> loadPrefs() async {
     final prefs = await SharedPreferences.getInstance();
     _url = prefs.getString('stream_url') ?? kDefaultStreamUrl;
     _autoConnect = prefs.getBool('auto_connect') ?? true;
     _usePcm = prefs.getBool('use_pcm') ?? true;
+    _prefBitrate = prefs.getInt('pref_bitrate') ?? 320000;
+    _prefFrameMs = prefs.getInt('pref_frame_ms') ?? 20;
+    _prefFlushMs = prefs.getInt('pref_flush_ms') ?? 40;
+    _prefDeviceId = prefs.getString('pref_device_id');
     notifyListeners();
   }
 
@@ -51,6 +70,10 @@ class PlayerController extends ChangeNotifier {
     await prefs.setString('stream_url', _url);
     await prefs.setBool('auto_connect', _autoConnect);
     await prefs.setBool('use_pcm', _usePcm);
+    await prefs.setInt('pref_bitrate', _prefBitrate);
+    await prefs.setInt('pref_frame_ms', _prefFrameMs);
+    await prefs.setInt('pref_flush_ms', _prefFlushMs);
+    if (_prefDeviceId != null) await prefs.setString('pref_device_id', _prefDeviceId!);
   }
 
   void setUrl(String newUrl) {
@@ -70,8 +93,64 @@ class PlayerController extends ChangeNotifier {
     notifyListeners();
   }
 
+  void setPrefBitrate(int bps) {
+    _prefBitrate = bps;
+    savePrefs();
+    notifyListeners();
+  }
+  void setPrefFrameMs(int ms) {
+    _prefFrameMs = ms;
+    savePrefs();
+    notifyListeners();
+  }
+  void setPrefFlushMs(int ms) {
+    _prefFlushMs = ms;
+    savePrefs();
+    notifyListeners();
+  }
+  void setPrefDeviceId(String? id) {
+    _prefDeviceId = id;
+    savePrefs();
+    notifyListeners();
+  }
+
+  Uri _configUri() {
+    try {
+      final u = Uri.parse(_url);
+      return Uri(scheme: u.scheme, host: u.host, port: u.port, path: '/config');
+    } catch (_) {
+      return Uri.parse('http://127.0.0.1:7350/config');
+    }
+  }
+
+  Future<bool> applyServerConfig() async {
+    final uri = _configUri();
+    final body = {
+      'bitrate': _prefBitrate,
+      'frame_ms': _prefFrameMs,
+      'flush_ms': _prefFlushMs,
+      // keep current defaults for latency/quality
+      'opus_use_vbr': false,
+      if (_prefDeviceId != null) 'device_id': _prefDeviceId,
+    };
+    try {
+      final resp = await http.post(uri, headers: {'Content-Type': 'application/json'}, body: convert.jsonEncode(body));
+      if (resp.statusCode >= 200 && resp.statusCode < 300) {
+        // Reconnect to apply new snapshot
+        await stop();
+        await connectAndPlay();
+        return true;
+      }
+    } catch (e) {
+      _emitStatus('Apply failed: $e');
+    }
+    return false;
+  }
+
   Future<void> init() async {
     await loadPrefs();
+    _startHealthMonitor();
+    _refreshDevices();
     _pcmChannel.setMethodCallHandler((call) async {
       if (call.method == 'pcmEvent') {
         final args = call.arguments as Map?;
@@ -128,6 +207,7 @@ class PlayerController extends ChangeNotifier {
           'channels': 2,
           'bits': 16,
         });
+        _lastPcmStart = DateTime.now();
       } else {
         // Stop PCM if running
         try { await _pcmChannel.invokeMethod('stopPcm'); } catch (_) {}
@@ -145,6 +225,55 @@ class PlayerController extends ChangeNotifier {
       notifyListeners();
       _scheduleReconnect();
     }
+  }
+
+  void _startHealthMonitor() {
+    _healthTimer?.cancel();
+    int failCount = 0;
+    _healthTimer = Timer.periodic(const Duration(seconds: 3), (_) async {
+      final uri = _configUri();
+      try {
+        final resp = await http.get(uri).timeout(const Duration(seconds: 1));
+        if (resp.statusCode >= 200 && resp.statusCode < 500) {
+          failCount = 0;
+          // Nudge PCM service if chosen
+          if (_usePcm && !_isConnecting) {
+            try {
+              if (DateTime.now().difference(_lastPcmStart) > const Duration(seconds: 30)) {
+                await _pcmChannel.invokeMethod('startPcm', {
+                  'host': '127.0.0.1',
+                  'port': 7352,
+                  'sampleRate': 48000,
+                  'channels': 2,
+                  'bits': 16,
+                });
+                _lastPcmStart = DateTime.now();
+              }
+            } catch (_) {}
+          }
+          return;
+        }
+        failCount++;
+      } catch (_) {
+        failCount++;
+      }
+      if (failCount >= 3 && _autoConnect) {
+        _emitStatus('Server down, attempting reconnect…');
+        _scheduleReconnect();
+      }
+    });
+  }
+
+  Future<void> _refreshDevices() async {
+    try {
+      final uri = _configUri().replace(path: '/devices');
+      final resp = await http.get(uri).timeout(const Duration(seconds: 2));
+      if (resp.statusCode == 200) {
+        final list = convert.jsonDecode(resp.body) as List<dynamic>;
+        _devices = list.cast<Map<String, dynamic>>();
+        notifyListeners();
+      }
+    } catch (_) {}
   }
 
   void _scheduleReconnect() {
@@ -365,6 +494,84 @@ class _Controls extends StatelessWidget {
   Widget build(BuildContext context) {
     return Column(
       children: [
+        Card(
+          margin: const EdgeInsets.only(bottom: 12),
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Preferences', style: TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    const Text('Bitrate'),
+                    const SizedBox(width: 12),
+                    DropdownButton<int>(
+                      value: controller.prefBitrate,
+                      items: const [96,128,160,192,256,320]
+                          .map((k) => DropdownMenuItem<int>(value: k*1000, child: Text('${k} kbps')))
+                          .toList(),
+                      onChanged: (v) { if (v!=null) controller.setPrefBitrate(v); },
+                    ),
+                    const SizedBox(width: 24),
+                    const Text('Frame'),
+                    const SizedBox(width: 8),
+                    DropdownButton<int>(
+                      value: controller.prefFrameMs,
+                      items: const [10,20,40]
+                          .map((k) => DropdownMenuItem<int>(value: k, child: Text('${k} ms')))
+                          .toList(),
+                      onChanged: (v) { if (v!=null) controller.setPrefFrameMs(v); },
+                    ),
+                    const SizedBox(width: 24),
+                    const Text('Flush'),
+                    const SizedBox(width: 8),
+                    DropdownButton<int>(
+                      value: controller.prefFlushMs,
+                      items: const [20,30,40,60]
+                          .map((k) => DropdownMenuItem<int>(value: k, child: Text('${k} ms')))
+                          .toList(),
+                      onChanged: (v) { if (v!=null) controller.setPrefFlushMs(v); },
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    const Text('Output device'),
+                    const SizedBox(width: 12),
+                    DropdownButton<String>(
+                      value: controller.prefDeviceId ?? '',
+                      items: [
+                        const DropdownMenuItem<String>(value: '', child: Text('Default (system)')),
+                        ...controller.devices.map((d) => DropdownMenuItem<String>(
+                          value: d['id'] as String,
+                          child: Text(d['name'] as String),
+                        ))
+                      ],
+                      onChanged: (v) { controller.setPrefDeviceId((v != null && v.isNotEmpty) ? v : null); },
+                    ),
+                    IconButton(
+                      tooltip: 'Refresh devices',
+                      onPressed: () async { await controller._refreshDevices(); },
+                      icon: const Icon(Icons.refresh),
+                    )
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: OutlinedButton.icon(
+                    icon: const Icon(Icons.tune),
+                    label: const Text('Apply to Server'),
+                    onPressed: () async { await controller.applyServerConfig(); },
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [

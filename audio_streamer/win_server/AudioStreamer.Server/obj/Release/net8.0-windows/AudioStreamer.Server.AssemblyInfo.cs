@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("AudioStreamer.Server")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+041ce93a8f17e2270ae91a1c520ae57211824ca2")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+5e4dcc57692693214b8f2a0f01951fb99768eca8")]
 [assembly: System.Reflection.AssemblyProductAttribute("AudioStreamer.Server")]
 [assembly: System.Reflection.AssemblyTitleAttribute("AudioStreamer.Server")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

@@ -22,9 +22,9 @@ Run
 Environment Variables (optional)
 - `AUDIOSTREAMER_PORT` (default 7350)
 - `AUDIOSTREAMER_PCM_PORT` (default 7352)
-- `AUDIOSTREAMER_BITRATE` (default 192000)
+- `AUDIOSTREAMER_BITRATE` (default 320000)
 - `AUDIOSTREAMER_FRAME_MS` (default 20)
-- `AUDIOSTREAMER_FLUSH_INTERVAL_MS` (default 20)
+- `AUDIOSTREAMER_FLUSH_INTERVAL_MS` (default 40)
 - `AUDIOSTREAMER_GAIN_DB` (default 0)
 - `AUDIOSTREAMER_NORMALIZE` (default false)
 - `AUDIOSTREAMER_TARGET_PEAK_DBFS` (default -1)
@@ -34,6 +34,7 @@ Environment Variables (optional)
 - `AUDIOSTREAMER_OPUS_VBR_CONSTRAINED` (true/false, default true)
 - `AUDIOSTREAMER_OPUS_COMPLEXITY` (0-10, default 10)
 - `AUDIOSTREAMER_OPUS_RESTRICTED_LOWDELAY` (true/false, default false)
+- `AUDIOSTREAMER_DEVICE_ID` (optional) – WASAPI device ID to capture; defaults to system multimedia device
 - `AUDIOSTREAMER_SINGLE_CLIENT` (true/false, default true)
 - `AUDIOSTREAMER_ADB_REVERSE` (true/false, default true)
 
@@ -49,3 +50,9 @@ Latency tips
   - Or CBR: `AUDIOSTREAMER_OPUS_USE_VBR=false`
   - Slightly higher flush: `AUDIOSTREAMER_FLUSH_INTERVAL_MS=40`
   - As a last resort for minimum algorithmic delay: `AUDIOSTREAMER_OPUS_RESTRICTED_LOWDELAY=true`
+
+Runtime preferences
+- GET `http://127.0.0.1:7350/config` returns current settings.
+- POST `http://127.0.0.1:7350/config` with JSON to apply for next streams (current streams keep their snapshot):
+  `{ "bitrate": 320000, "frame_ms": 20, "flush_ms": 40, "opus_use_vbr": false }`
+- List devices: GET `http://127.0.0.1:7350/devices` (returns `[{id,name,state,isDefault,isDefaultComm}]`)
