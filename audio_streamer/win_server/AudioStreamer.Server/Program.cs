@@ -15,6 +15,12 @@ using System.Text.Json;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Kestrel: disable min response data rate to avoid disconnects under USB jitter
+builder.Services.Configure<Microsoft.AspNetCore.Server.Kestrel.Core.KestrelServerOptions>(o =>
+{
+    o.Limits.MinResponseDataRate = null;
+});
+
 // Settings
 int port = GetEnvInt("AUDIOSTREAMER_PORT", 7350);
 int pcmPort = GetEnvInt("AUDIOSTREAMER_PCM_PORT", 7352);
@@ -386,7 +392,7 @@ class CaptureManager
                     int n = sampleProvider.Read(floatBuf, read, floatBuf.Length - read);
                     if (n == 0)
                     {
-                        if (zeroReads < 5)
+                        if (zeroReads < 8)
                         {
                             zeroReads++;
                             await Task.Delay(1, ct); // short wait to avoid padding with silence
@@ -651,7 +657,7 @@ class PcmTcpServerService : BackgroundService
         var buffered = new BufferedWaveProvider(capture.WaveFormat)
         {
             DiscardOnBufferOverflow = true,
-            BufferDuration = TimeSpan.FromMilliseconds(50),
+            BufferDuration = TimeSpan.FromMilliseconds(80),
             ReadFully = false
         };
         capture.DataAvailable += (s, a) => buffered.AddSamples(a.Buffer, 0, a.BytesRecorded);
@@ -685,7 +691,7 @@ class PcmTcpServerService : BackgroundService
                     int n = sampleProvider.Read(floatBuf, read, floatBuf.Length - read);
                     if (n == 0)
                     {
-                        if (zeroReads < 3)
+                        if (zeroReads < 8)
                         {
                             zeroReads++;
                             await Task.Delay(1, ct);

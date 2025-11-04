@@ -59,78 +59,88 @@ class PcmService : Service() {
         stopWorker()
         running.set(true)
         worker = Thread {
-            var socket: Socket? = null
-            var track: AudioTrack? = null
-            try {
-                socket = Socket()
-                socket.tcpNoDelay = true
-                socket.connect(InetSocketAddress(host, port), 2000)
-                val input: InputStream = socket.getInputStream()
+            while (running.get()) {
+                var socket: Socket? = null
+                var track: AudioTrack? = null
+                try {
+                    socket = Socket()
+                    socket.tcpNoDelay = true
+                    socket.keepAlive = true
+                    socket.receiveBufferSize = 64 * 1024
+                    socket.sendBufferSize = 64 * 1024
+                    socket.connect(InetSocketAddress(host, port), 1500)
+                    val input: InputStream = socket.getInputStream()
 
-                val channelConfig = if (channels == 1)
-                    AudioFormat.CHANNEL_OUT_MONO else AudioFormat.CHANNEL_OUT_STEREO
-                val audioFormat = if (bits == 16) AudioFormat.ENCODING_PCM_16BIT else AudioFormat.ENCODING_PCM_8BIT
-                val minBuf = AudioTrack.getMinBufferSize(sampleRate, channelConfig, audioFormat)
-                val desiredBuf = minBuf.coerceAtLeast(sampleRate * channels * (bits / 8) / 33) // ~30ms
+                    val channelConfig = if (channels == 1)
+                        AudioFormat.CHANNEL_OUT_MONO else AudioFormat.CHANNEL_OUT_STEREO
+                    val audioFormat = if (bits == 16) AudioFormat.ENCODING_PCM_16BIT else AudioFormat.ENCODING_PCM_8BIT
+                    val minBuf = AudioTrack.getMinBufferSize(sampleRate, channelConfig, audioFormat)
+                    // target ~80 ms to absorb USB/adb jitter while remaining responsive
+                    val targetMs = 80
+                    val desiredBuf = minBuf.coerceAtLeast(sampleRate * channels * (bits / 8) * targetMs / 1000)
 
-                track = if (Build.VERSION.SDK_INT >= 29) {
-                    AudioTrack.Builder()
-                        .setAudioAttributes(
-                            AudioAttributes.Builder()
-                                .setUsage(AudioAttributes.USAGE_MEDIA)
-                                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                                .build()
+                    track = if (Build.VERSION.SDK_INT >= 29) {
+                        AudioTrack.Builder()
+                            .setAudioAttributes(
+                                AudioAttributes.Builder()
+                                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                                    .build()
+                            )
+                            .setAudioFormat(
+                                AudioFormat.Builder()
+                                    .setSampleRate(sampleRate)
+                                    .setEncoding(audioFormat)
+                                    .setChannelMask(channelConfig)
+                                    .build()
+                            )
+                            .setTransferMode(AudioTrack.MODE_STREAM)
+                            .setBufferSizeInBytes(desiredBuf)
+                            .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+                            .build()
+                    } else {
+                        @Suppress("DEPRECATION")
+                        AudioTrack(
+                            AudioManager.STREAM_MUSIC,
+                            sampleRate,
+                            channelConfig,
+                            audioFormat,
+                            desiredBuf,
+                            AudioTrack.MODE_STREAM
                         )
-                        .setAudioFormat(
-                            AudioFormat.Builder()
-                                .setSampleRate(sampleRate)
-                                .setEncoding(audioFormat)
-                                .setChannelMask(channelConfig)
-                                .build()
-                        )
-                        .setTransferMode(AudioTrack.MODE_STREAM)
-                        .setBufferSizeInBytes(desiredBuf)
-                        .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
-                        .build()
-                } else {
-                    @Suppress("DEPRECATION")
-                    AudioTrack(
-                        AudioManager.STREAM_MUSIC,
-                        sampleRate,
-                        channelConfig,
-                        audioFormat,
-                        desiredBuf,
-                        AudioTrack.MODE_STREAM
-                    )
-                }
-
-                track.play()
-
-                val frameBytes = (sampleRate / 100) * channels * (bits / 8) // 10ms
-                val buffer = ByteArray(frameBytes)
-                while (running.get()) {
-                    var read = 0
-                    while (read < buffer.size) {
-                        val r = input.read(buffer, read, buffer.size - read)
-                        if (r <= 0) throw RuntimeException("socket closed")
-                        read += r
                     }
-                    var written = 0
-                    while (written < buffer.size) {
-                        val w = track.write(buffer, written, buffer.size - written)
-                        if (w < 0) throw RuntimeException("audiotrack write error $w")
-                        written += w
+
+                    track.play()
+
+                    val frameBytes = (sampleRate / 100) * channels * (bits / 8) // 10ms
+                    val buffer = ByteArray(frameBytes)
+                    while (running.get()) {
+                        var read = 0
+                        while (read < buffer.size) {
+                            val r = input.read(buffer, read, buffer.size - read)
+                            if (r <= 0) throw RuntimeException("socket closed")
+                            read += r
+                        }
+                        var written = 0
+                        while (written < buffer.size) {
+                            val w = track.write(buffer, written, buffer.size - written)
+                            if (w < 0) throw RuntimeException("audiotrack write error $w")
+                            written += w
+                        }
                     }
+                } catch (t: Throwable) {
+                    Log.e(tag, "pcm service error", t)
+                    // brief backoff before reconnect
+                    try { Thread.sleep(300) } catch (_: Throwable) {}
+                } finally {
+                    try { track?.stop() } catch (_: Throwable) {}
+                    try { track?.release() } catch (_: Throwable) {}
+                    try { socket?.close() } catch (_: Throwable) {}
                 }
-            } catch (t: Throwable) {
-                Log.e(tag, "pcm service error", t)
-            } finally {
-                try { track?.stop() } catch (_: Throwable) {}
-                try { track?.release() } catch (_: Throwable) {}
-                try { socket?.close() } catch (_: Throwable) {}
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
             }
+            // exiting worker loop
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
         }.apply {
             name = "pcm-service"
             priority = Thread.NORM_PRIORITY + 1
@@ -144,4 +154,3 @@ class PcmService : Service() {
         worker = null
     }
 }
-
