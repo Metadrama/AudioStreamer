@@ -40,6 +40,7 @@ class PlayerController extends ChangeNotifier {
   List<Map<String, dynamic>> _devices = const [];
   DateTime _lastPcmStart = DateTime.fromMillisecondsSinceEpoch(0);
   int _prefGainDb = 0; // software preamp on server
+  bool _pcmRunning = false;
 
   Stream<String> get statusStream => _statusController.stream;
   AudioPlayer get player => _player;
@@ -47,6 +48,7 @@ class PlayerController extends ChangeNotifier {
   bool get autoConnect => _autoConnect;
   bool get usePcm => _usePcm;
   bool get isConnecting => _isConnecting;
+  bool get isConnected => _usePcm ? _pcmRunning : _player.playerState.playing;
   String? get pcmStatus => _pcmStatus;
   int get prefBitrate => _prefBitrate;
   int get prefFrameMs => _prefFrameMs;
@@ -222,6 +224,7 @@ class PlayerController extends ChangeNotifier {
           'bits': 16,
         });
         _lastPcmStart = DateTime.now();
+        _pcmRunning = true;
       } else {
         // Stop PCM if running
         try { await _pcmChannel.invokeMethod('stopPcm'); } catch (_) {}
@@ -262,6 +265,7 @@ class PlayerController extends ChangeNotifier {
                   'bits': 16,
                 });
                 _lastPcmStart = DateTime.now();
+                _pcmRunning = true;
               }
             } catch (_) {}
           }
@@ -292,6 +296,7 @@ class PlayerController extends ChangeNotifier {
 
   void _scheduleReconnect() {
     if (!_autoConnect) return;
+    _pcmRunning = false;
     _retryTimer?.cancel();
     _retryAttempt = (_retryAttempt + 1).clamp(1, 8);
     final delay = Duration(seconds: [2, 3, 5, 8, 13, 21, 30, 45][_retryAttempt - 1]);
@@ -325,6 +330,7 @@ class PlayerController extends ChangeNotifier {
       try { await _pcmChannel.invokeMethod('stopPcm'); } catch (_) {}
     }
     await _player.stop();
+    _pcmRunning = false;
   }
 
   @override
@@ -349,7 +355,9 @@ class MainApp extends StatelessWidget {
       create: (_) => PlayerController()..init(),
       child: MaterialApp(
         title: 'Audio Stream Client',
-        theme: ThemeData(colorSchemeSeed: Colors.blue, useMaterial3: true),
+        themeMode: ThemeMode.dark,
+        theme: ThemeData(colorSchemeSeed: Colors.teal, brightness: Brightness.dark, useMaterial3: true),
+        darkTheme: ThemeData(colorSchemeSeed: Colors.teal, brightness: Brightness.dark, useMaterial3: true),
         home: const HomePage(),
       ),
     );
@@ -623,30 +631,27 @@ class _Controls extends StatelessWidget {
             ),
           ),
         ),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            FilledButton.icon(
-              icon: Icon(controller.player.playing ? Icons.pause : Icons.play_arrow),
-              label: Text(controller.player.playing ? 'Pause' : 'Play'),
-              onPressed: () async {
-                if (controller.player.playing) {
-                  await controller.pause();
-                } else {
-                  await controller.play();
-                }
-              },
+        Center(
+          child: FilledButton.icon(
+            icon: controller.isConnecting
+                ? const SizedBox(
+                    height: 20,
+                    width: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : (controller.isConnected ? const Icon(Icons.check_circle) : const Icon(Icons.power_settings_new)),
+            label: Text(controller.isConnecting
+                ? 'Connecting…'
+                : (controller.isConnected ? 'Connected' : 'Connect')),
+            style: FilledButton.styleFrom(
+              backgroundColor: controller.isConnected ? Colors.green : null,
             ),
-            const SizedBox(width: 12),
-            OutlinedButton.icon(
-              icon: const Icon(Icons.refresh),
-              label: const Text('Reconnect'),
-              onPressed: () async {
-                await controller.stop();
-                await controller.connectAndPlay();
-              },
-            ),
-          ],
+            onPressed: (controller.isConnected || controller.isConnecting)
+                ? null
+                : () async {
+                    await controller.connectAndPlay();
+                  },
+          ),
         ),
         const SizedBox(height: 8),
         const Text(
