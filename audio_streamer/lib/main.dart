@@ -87,10 +87,13 @@ class PlayerController extends ChangeNotifier {
     notifyListeners();
   }
 
-  void setUsePcm(bool value) {
+  Future<void> setUsePcm(bool value) async {
     _usePcm = value;
-    savePrefs();
+    await savePrefs();
     notifyListeners();
+    // Seamlessly switch paths to avoid double playback/echo
+    await stop();
+    await connectAndPlay();
   }
 
   void setPrefBitrate(int bps) {
@@ -404,7 +407,7 @@ class _HomePageState extends State<HomePage> {
               ),
             Row(
               children: [
-                Switch(value: pc.usePcm, onChanged: (v) => setState(() { pc.setUsePcm(v); })),
+                Switch(value: pc.usePcm, onChanged: (v) async { await pc.setUsePcm(v); }),
                 const SizedBox(width: 8),
                 const Text('Low-latency (PCM over USB)')
               ],

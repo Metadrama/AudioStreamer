@@ -55,8 +55,7 @@ catch { }
 
 app.MapGet("/", () => Results.Text("AudioStreamer.Server running. GET /stream.opus for audio. POST /config to adjust."));
 
-var connectionLock = new object();
-bool clientConnected = false;
+// Global single-client gate across Opus and PCM (declared later in file)
 
 app.MapGet("/stream.opus", async (HttpContext ctx, CaptureManager cap, MutableConfig live) =>
 {
@@ -69,14 +68,14 @@ app.MapGet("/stream.opus", async (HttpContext ctx, CaptureManager cap, MutableCo
 
     if (live.SingleClient)
     {
-        lock (connectionLock)
+        lock (ClientGate.Lock)
         {
-            if (clientConnected)
+            if (ClientGate.InUse)
             {
                 ctx.Response.StatusCode = 409;
                 return;
             }
-            clientConnected = true;
+            ClientGate.InUse = true;
         }
     }
 
@@ -97,7 +96,7 @@ app.MapGet("/stream.opus", async (HttpContext ctx, CaptureManager cap, MutableCo
     {
         if (live.SingleClient)
         {
-            lock (connectionLock) clientConnected = false;
+            lock (ClientGate.Lock) ClientGate.InUse = false;
         }
         await ctx.Response.Body.FlushAsync();
     }
@@ -177,6 +176,12 @@ await app.RunAsync();
 
 static int GetEnvInt(string key, int def) => int.TryParse(Environment.GetEnvironmentVariable(key), out var v) ? v : def;
 static bool GetEnvBool(string key, bool def) => bool.TryParse(Environment.GetEnvironmentVariable(key), out var v) ? v : def;
+
+static class ClientGate
+{
+    public static readonly object Lock = new object();
+    public static bool InUse = false;
+}
 
 // Mutable config for runtime preferences; snapshot when starting streams
 class MutableConfig
@@ -592,9 +597,24 @@ class PcmTcpServerService : BackgroundService
         Console.WriteLine("[pcm] client connected");
         client.NoDelay = true;
         using var stream = client.GetStream();
+        var snapshot = _live.Snapshot();
+        bool gateEntered = false;
         try
         {
-            await StreamPcmAsync(stream, _live.Snapshot(), ct);
+            if (snapshot.SingleClient)
+            {
+                lock (ClientGate.Lock)
+                {
+                    if (ClientGate.InUse)
+                    {
+                        Console.WriteLine("[pcm] rejecting: single-client gate active");
+                        return;
+                    }
+                    ClientGate.InUse = true;
+                    gateEntered = true;
+                }
+            }
+            await StreamPcmAsync(stream, snapshot, ct);
         }
         catch (Exception ex)
         {
@@ -602,6 +622,10 @@ class PcmTcpServerService : BackgroundService
         }
         finally
         {
+            if (gateEntered)
+            {
+                lock (ClientGate.Lock) ClientGate.InUse = false;
+            }
             client.Close();
             Console.WriteLine("[pcm] client disconnected");
         }
