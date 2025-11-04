@@ -39,6 +39,7 @@ class PlayerController extends ChangeNotifier {
   String? _prefDeviceId;
   List<Map<String, dynamic>> _devices = const [];
   DateTime _lastPcmStart = DateTime.fromMillisecondsSinceEpoch(0);
+  int _prefGainDb = 0; // software preamp on server
 
   Stream<String> get statusStream => _statusController.stream;
   AudioPlayer get player => _player;
@@ -52,6 +53,7 @@ class PlayerController extends ChangeNotifier {
   int get prefFlushMs => _prefFlushMs;
   String? get prefDeviceId => _prefDeviceId;
   List<Map<String, dynamic>> get devices => _devices;
+  int get prefGainDb => _prefGainDb;
 
   Future<void> loadPrefs() async {
     final prefs = await SharedPreferences.getInstance();
@@ -62,6 +64,7 @@ class PlayerController extends ChangeNotifier {
     _prefFrameMs = prefs.getInt('pref_frame_ms') ?? 20;
     _prefFlushMs = prefs.getInt('pref_flush_ms') ?? 40;
     _prefDeviceId = prefs.getString('pref_device_id');
+    _prefGainDb = prefs.getInt('pref_gain_db') ?? 0;
     notifyListeners();
   }
 
@@ -74,6 +77,7 @@ class PlayerController extends ChangeNotifier {
     await prefs.setInt('pref_frame_ms', _prefFrameMs);
     await prefs.setInt('pref_flush_ms', _prefFlushMs);
     if (_prefDeviceId != null) await prefs.setString('pref_device_id', _prefDeviceId!);
+    await prefs.setInt('pref_gain_db', _prefGainDb);
   }
 
   void setUrl(String newUrl) {
@@ -116,6 +120,11 @@ class PlayerController extends ChangeNotifier {
     savePrefs();
     notifyListeners();
   }
+  void setPrefGainDb(int db) {
+    _prefGainDb = db.clamp(0, 18);
+    savePrefs();
+    notifyListeners();
+  }
 
   Uri _configUri() {
     try {
@@ -135,6 +144,8 @@ class PlayerController extends ChangeNotifier {
       // keep current defaults for latency/quality
       'opus_use_vbr': false,
       if (_prefDeviceId != null) 'device_id': _prefDeviceId,
+      'gain_db': _prefGainDb,
+      'target_peak_dbfs': -1,
     };
     try {
       final resp = await http.post(uri, headers: {'Content-Type': 'application/json'}, body: convert.jsonEncode(body));
@@ -389,59 +400,67 @@ class _HomePageState extends State<HomePage> {
           ),
         ],
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (pc.usePcm)
-              Container(
-                padding: const EdgeInsets.all(8),
-                margin: const EdgeInsets.only(bottom: 8),
-                decoration: BoxDecoration(
-                  color: Colors.green.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(8),
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (pc.usePcm)
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  margin: const EdgeInsets.only(bottom: 8),
+                  decoration: BoxDecoration(
+                    color: Colors.green.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(pc.pcmStatus ?? 'PCM mode (foreground service)',
+                      style: const TextStyle(fontWeight: FontWeight.w600)),
                 ),
-                child: Text(pc.pcmStatus ?? 'PCM mode (foreground service)',
-                    style: const TextStyle(fontWeight: FontWeight.w600)),
+              Wrap(
+                spacing: 12,
+                runSpacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  Row(mainAxisSize: MainAxisSize.min, children: [
+                    Switch(value: pc.usePcm, onChanged: (v) async { await pc.setUsePcm(v); }),
+                    const SizedBox(width: 8),
+                    const Text('Low-latency (PCM over USB)')
+                  ]),
+                ],
               ),
-            Row(
-              children: [
-                Switch(value: pc.usePcm, onChanged: (v) async { await pc.setUsePcm(v); }),
-                const SizedBox(width: 8),
-                const Text('Low-latency (PCM over USB)')
-              ],
-            ),
-            Row(
-              children: [
-                const Text('USB URL', style: TextStyle(fontWeight: FontWeight.w600)),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: TextField(
-                    controller: _urlCtrl,
-                    enabled: _editing && !pc.usePcm,
-                    decoration: const InputDecoration(
-                      hintText: kDefaultStreamUrl,
-                      border: OutlineInputBorder(),
-                      isDense: true,
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  const Text('USB URL', style: TextStyle(fontWeight: FontWeight.w600)),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: TextField(
+                      controller: _urlCtrl,
+                      enabled: _editing && !pc.usePcm,
+                      decoration: const InputDecoration(
+                        hintText: kDefaultStreamUrl,
+                        border: OutlineInputBorder(),
+                        isDense: true,
+                      ),
                     ),
                   ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Switch(value: pc.autoConnect, onChanged: (v) => pc.setAutoConnect(v)),
-                const SizedBox(width: 8),
-                const Text('Auto-connect on launch'),
-              ],
-            ),
-            const SizedBox(height: 16),
-            _StatusCard(controller: pc),
-            const Spacer(),
-            _Controls(controller: pc),
-          ],
+                ],
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Switch(value: pc.autoConnect, onChanged: (v) => pc.setAutoConnect(v)),
+                  const SizedBox(width: 8),
+                  const Text('Auto-connect on launch'),
+                ],
+              ),
+              const SizedBox(height: 16),
+              _StatusCard(controller: pc),
+              const SizedBox(height: 16),
+              _Controls(controller: pc),
+            ],
+          ),
         ),
       ),
     );
@@ -506,62 +525,91 @@ class _Controls extends StatelessWidget {
               children: [
                 const Text('Preferences', style: TextStyle(fontWeight: FontWeight.bold)),
                 const SizedBox(height: 8),
-                Row(
+                Wrap(
+                  spacing: 16,
+                  runSpacing: 8,
+                  crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
-                    const Text('Bitrate'),
-                    const SizedBox(width: 12),
-                    DropdownButton<int>(
-                      value: controller.prefBitrate,
-                      items: const [96,128,160,192,256,320]
-                          .map((k) => DropdownMenuItem<int>(value: k*1000, child: Text('${k} kbps')))
-                          .toList(),
-                      onChanged: (v) { if (v!=null) controller.setPrefBitrate(v); },
-                    ),
-                    const SizedBox(width: 24),
-                    const Text('Frame'),
-                    const SizedBox(width: 8),
-                    DropdownButton<int>(
-                      value: controller.prefFrameMs,
-                      items: const [10,20,40]
-                          .map((k) => DropdownMenuItem<int>(value: k, child: Text('${k} ms')))
-                          .toList(),
-                      onChanged: (v) { if (v!=null) controller.setPrefFrameMs(v); },
-                    ),
-                    const SizedBox(width: 24),
-                    const Text('Flush'),
-                    const SizedBox(width: 8),
-                    DropdownButton<int>(
-                      value: controller.prefFlushMs,
-                      items: const [20,30,40,60]
-                          .map((k) => DropdownMenuItem<int>(value: k, child: Text('${k} ms')))
-                          .toList(),
-                      onChanged: (v) { if (v!=null) controller.setPrefFlushMs(v); },
-                    ),
+                    Row(mainAxisSize: MainAxisSize.min, children: [
+                      const Text('Bitrate'),
+                      const SizedBox(width: 8),
+                      DropdownButton<int>(
+                        value: controller.prefBitrate,
+                        items: const [96,128,160,192,256,320]
+                            .map((k) => DropdownMenuItem<int>(value: k*1000, child: Text('${k} kbps')))
+                            .toList(),
+                        onChanged: (v) { if (v!=null) controller.setPrefBitrate(v); },
+                      ),
+                    ]),
+                    Row(mainAxisSize: MainAxisSize.min, children: [
+                      const Text('Frame'),
+                      const SizedBox(width: 8),
+                      DropdownButton<int>(
+                        value: controller.prefFrameMs,
+                        items: const [10,20,40]
+                            .map((k) => DropdownMenuItem<int>(value: k, child: Text('${k} ms')))
+                            .toList(),
+                        onChanged: (v) { if (v!=null) controller.setPrefFrameMs(v); },
+                      ),
+                    ]),
+                    Row(mainAxisSize: MainAxisSize.min, children: [
+                      const Text('Flush'),
+                      const SizedBox(width: 8),
+                      DropdownButton<int>(
+                        value: controller.prefFlushMs,
+                        items: const [20,30,40,60]
+                            .map((k) => DropdownMenuItem<int>(value: k, child: Text('${k} ms')))
+                            .toList(),
+                        onChanged: (v) { if (v!=null) controller.setPrefFlushMs(v); },
+                      ),
+                    ]),
                   ],
                 ),
                 const SizedBox(height: 8),
-                Row(
+                Wrap(
+                  spacing: 12,
+                  runSpacing: 8,
+                  crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
-                    const Text('Output device'),
-                    const SizedBox(width: 12),
-                    DropdownButton<String>(
-                      value: controller.prefDeviceId ?? '',
-                      items: [
-                        const DropdownMenuItem<String>(value: '', child: Text('Default (system)')),
-                        ...controller.devices.map((d) => DropdownMenuItem<String>(
-                          value: d['id'] as String,
-                          child: Text(d['name'] as String),
-                        ))
-                      ],
-                      onChanged: (v) { controller.setPrefDeviceId((v != null && v.isNotEmpty) ? v : null); },
-                    ),
-                    IconButton(
-                      tooltip: 'Refresh devices',
-                      onPressed: () async { await controller._refreshDevices(); },
-                      icon: const Icon(Icons.refresh),
-                    )
+                    Row(mainAxisSize: MainAxisSize.min, children: [
+                      const Text('Output device'),
+                      const SizedBox(width: 8),
+                      DropdownButton<String>(
+                        value: controller.prefDeviceId ?? '',
+                        items: [
+                          const DropdownMenuItem<String>(value: '', child: Text('Default (system)')),
+                          ...controller.devices.map((d) => DropdownMenuItem<String>(
+                                value: d['id'] as String,
+                                child: Text(d['name'] as String),
+                              ))
+                        ],
+                        onChanged: (v) { controller.setPrefDeviceId((v != null && v.isNotEmpty) ? v : null); },
+                      ),
+                      IconButton(
+                        tooltip: 'Refresh devices',
+                        onPressed: () async { await controller._refreshDevices(); },
+                        icon: const Icon(Icons.refresh),
+                      )
+                    ]),
                   ],
                 ),
+                const SizedBox(height: 8),
+                Row(children: [
+                  const Text('Volume boost'),
+                  Expanded(
+                    child: Slider(
+                      value: controller.prefGainDb.toDouble(),
+                      min: 0,
+                      max: 18,
+                      divisions: 18,
+                      label: '+${controller.prefGainDb} dB',
+                      onChanged: (v) { controller.setPrefGainDb(v.round()); },
+                    ),
+                  ),
+                  SizedBox(
+                      width: 48,
+                      child: Text('+${controller.prefGainDb} dB', textAlign: TextAlign.right)),
+                ]),
                 const SizedBox(height: 8),
                 Align(
                   alignment: Alignment.centerLeft,
