@@ -34,8 +34,8 @@ class PlayerController extends ChangeNotifier {
   Timer? _healthTimer;
   // Preferences for server
   int _prefBitrate = 320000;
-  int _prefFrameMs = 20;
-  int _prefFlushMs = 40;
+  int _prefFrameMs = 10;
+  int _prefFlushMs = 30;
   String? _prefDeviceId;
   List<Map<String, dynamic>> _devices = const [];
   DateTime _lastPcmStart = DateTime.fromMillisecondsSinceEpoch(0);
@@ -63,8 +63,8 @@ class PlayerController extends ChangeNotifier {
     _autoConnect = prefs.getBool('auto_connect') ?? true;
     _usePcm = prefs.getBool('use_pcm') ?? true;
     _prefBitrate = prefs.getInt('pref_bitrate') ?? 320000;
-    _prefFrameMs = prefs.getInt('pref_frame_ms') ?? 20;
-    _prefFlushMs = prefs.getInt('pref_flush_ms') ?? 40;
+    _prefFrameMs = prefs.getInt('pref_frame_ms') ?? 10;
+    _prefFlushMs = prefs.getInt('pref_flush_ms') ?? 30;
     _prefDeviceId = prefs.getString('pref_device_id');
     _prefGainDb = prefs.getInt('pref_gain_db') ?? 0;
     notifyListeners();
