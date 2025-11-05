@@ -48,6 +48,7 @@ builder.Services.AddSingleton(liveConfig);
 builder.Services.AddSingleton<CaptureManager>();
 builder.Services.AddHostedService<AdbReverseService>();
 builder.Services.AddHostedService<PcmTcpServerService>();
+builder.Services.AddHostedService<UdpDiscoveryService>();
 
 var app = builder.Build();
 
@@ -163,10 +164,9 @@ app.MapPost("/config", async (HttpContext ctx, MutableConfig cfg) =>
 
 app.Lifetime.ApplicationStarted.Register(() =>
 {
-    Console.WriteLine($"AudioStreamer.Server listening on http://127.0.0.1:{liveConfig.Port}/stream.opus");
-    Console.WriteLine($"PCM (ultra-low-latency) on tcp://127.0.0.1:{liveConfig.PcmPort}");
-    Console.WriteLine("Tip: adb reverse tcp:7350 tcp:7350");
-    Console.WriteLine("Tip: adb reverse tcp:7352 tcp:7352");
+    Console.WriteLine($"AudioStreamer.Server listening on http://0.0.0.0:{liveConfig.Port}/stream.opus (all interfaces)");
+    Console.WriteLine($"PCM (ultra-low-latency) on tcp://0.0.0.0:{liveConfig.PcmPort} (all interfaces)");
+    Console.WriteLine("Tip: On the phone, set Server URL to http://<PC_LAN_IP>:7350/stream.opus");
 });
 
 // Restore timer resolution on shutdown
@@ -176,7 +176,8 @@ app.Lifetime.ApplicationStopping.Register(() =>
 });
 
 app.Urls.Clear();
-app.Urls.Add($"http://127.0.0.1:{port}");
+// Bind to all interfaces for LAN access
+app.Urls.Add($"http://0.0.0.0:{port}");
 
 await app.RunAsync();
 
@@ -582,7 +583,8 @@ class PcmTcpServerService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, _live.PcmPort);
+    // Bind to all interfaces for LAN access
+    var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Any, _live.PcmPort);
         listener.Server.NoDelay = true;
         listener.Start();
         Console.WriteLine("[pcm] TCP listener started");
@@ -744,6 +746,40 @@ class PcmTcpServerService : BackgroundService
         finally
         {
             try { capture.StopRecording(); } catch { }
+        }
+    }
+}
+
+// Simple UDP discovery responder for LAN clients
+class UdpDiscoveryService : BackgroundService
+{
+    private readonly MutableConfig _cfg;
+    public UdpDiscoveryService(MutableConfig cfg) => _cfg = cfg;
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        using var udp = new System.Net.Sockets.UdpClient(new System.Net.IPEndPoint(System.Net.IPAddress.Any, 7531));
+        udp.EnableBroadcast = true;
+        Console.WriteLine("[discovery] UDP listening on 0.0.0.0:7531");
+        try
+        {
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                var result = await udp.ReceiveAsync(stoppingToken);
+                var data = System.Text.Encoding.ASCII.GetString(result.Buffer);
+                if (string.Equals(data.Trim(), "AUDSTRM_DISCOVER_V1", StringComparison.Ordinal))
+                {
+                    var respObj = new { port = _cfg.Port, pcm = _cfg.PcmPort, name = Environment.MachineName };
+                    var json = System.Text.Json.JsonSerializer.Serialize(respObj);
+                    var payload = System.Text.Encoding.UTF8.GetBytes("AUDSTRM_OK_V1 " + json);
+                    await udp.SendAsync(payload, payload.Length, result.RemoteEndPoint);
+                }
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[discovery] error: {ex.Message}");
         }
     }
 }

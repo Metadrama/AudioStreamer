@@ -1,10 +1,10 @@
-Windows Audio Stream Server (HTTP over ADB)
+Windows Audio Stream Server (HTTP/TCP over LAN)
 
 Overview
 - Captures Windows system audio via WASAPI loopback
 - Encodes Opus and serves Ogg/Opus over HTTP
 - Provides ultra-low-latency raw PCM over TCP for Android client
-- Maintains `adb reverse` for both ports (7350 = Opus, 7352 = PCM) when available
+- Listens on all interfaces (0.0.0.0) so Android can connect over Wi‑Fi/LAN
 - Works with the Flutter Android client at:
   - Opus: http://127.0.0.1:7350/stream.opus
   - PCM:  tcp://127.0.0.1:7352
@@ -16,8 +16,8 @@ Build
 Run
 - Ensure `adb` is on PATH (`adb --version`).
 - Run: `dotnet run --project win_server/AudioStreamer.Server -c Release`
-- The server listens on `http://127.0.0.1:7350/stream.opus` (Opus) and `tcp://127.0.0.1:7352` (PCM).
-- If `adb` is available, it periodically issues `adb reverse tcp:7350 tcp:7350` and `adb reverse tcp:7352 tcp:7352`.
+- The server listens on `http://0.0.0.0:7350/stream.opus` (Opus) and `tcp://0.0.0.0:7352` (PCM).
+  Use your PC's LAN IP (e.g., `http://192.168.1.50:7350/stream.opus`) in the Android app. PCM mode will use the same host on port 7352.
 
 Environment Variables (optional)
 - `AUDIOSTREAMER_PORT` (default 7350)
@@ -38,6 +38,14 @@ Environment Variables (optional)
 - `AUDIOSTREAMER_SINGLE_CLIENT` (true/false, default true)
 - `AUDIOSTREAMER_ADB_REVERSE` (true/false, default true)
 
+Wi‑Fi/LAN setup
+- Ensure Windows Firewall allows inbound TCP on ports 7350 and 7352 for this app.
+- For automatic discovery, also allow inbound UDP on port 7531.
+- Phone and PC must be on the same network (Wi‑Fi/LAN) or reachable via VPN.
+- In the Android app, set Server URL to `http://<PC_LAN_IP>:7350/stream.opus` and tap Connect.
+
+Automatic discovery (optional)
+- The server listens for UDP discovery on port 7531. The Android app can broadcast a probe and the server replies with its Opus/PCM ports and hostname.
 Notes
 - Most Windows systems use 48 kHz stereo for the system mix. If yours differs, streaming still works — the server resamples to 48 kHz stereo.
 - Only one client is allowed at a time (simple and stable). If needed, we can add multi-client fanout later.

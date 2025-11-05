@@ -1,12 +1,14 @@
 ﻿import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'dart:io';
 import 'package:just_audio/just_audio.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert' as convert;
 
+// Default server URL (enter your PC's IP for Wi‑Fi/LAN use)
 const String kDefaultStreamUrl = 'http://127.0.0.1:7350/stream.opus';
 
 
@@ -41,6 +43,9 @@ class PlayerController extends ChangeNotifier {
   DateTime _lastPcmStart = DateTime.fromMillisecondsSinceEpoch(0);
   int _prefGainDb = 0; // software preamp on server
   bool _pcmRunning = false;
+  // Discovery state
+  bool _discovering = false;
+  List<DiscoveredServer> _found = const [];
 
   Stream<String> get statusStream => _statusController.stream;
   AudioPlayer get player => _player;
@@ -56,6 +61,8 @@ class PlayerController extends ChangeNotifier {
   String? get prefDeviceId => _prefDeviceId;
   List<Map<String, dynamic>> get devices => _devices;
   int get prefGainDb => _prefGainDb;
+  bool get discovering => _discovering;
+  List<DiscoveredServer> get foundServers => _found;
 
   Future<void> loadPrefs() async {
     final prefs = await SharedPreferences.getInstance();
@@ -207,6 +214,58 @@ class PlayerController extends ChangeNotifier {
     }
   }
 
+  // UDP discovery: broadcast probe and collect responses briefly
+  Future<List<DiscoveredServer>> discoverServers({Duration timeout = const Duration(seconds: 1)}) async {
+    _discovering = true;
+    _found = const [];
+    notifyListeners();
+    final List<DiscoveredServer> results = [];
+    try {
+      // Use RawDatagramSocket to send a broadcast and receive replies
+  final socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+      socket.broadcastEnabled = true;
+      final probe = 'AUDSTRM_DISCOVER_V1';
+  final data = convert.utf8.encode(probe);
+      // Send to limited set of common broadcast addresses
+      final bcasts = <InternetAddress>[
+        InternetAddress('255.255.255.255'),
+      ];
+      for (final addr in bcasts) {
+        socket.send(data, addr, 7531);
+      }
+      final endAt = DateTime.now().add(timeout);
+      socket.listen((evt) {
+        if (evt == RawSocketEvent.read) {
+          final d = socket.receive();
+          if (d == null) return;
+          try {
+            final msg = convert.utf8.decode(d.data);
+            if (msg.startsWith('AUDSTRM_OK_V1 ')) {
+              final jsonStr = msg.substring('AUDSTRM_OK_V1 '.length);
+              final obj = convert.jsonDecode(jsonStr) as Map<String, dynamic>;
+              final host = d.address.address; // use source IP
+              final port = (obj['port'] as num?)?.toInt() ?? 7350;
+              final pcm = (obj['pcm'] as num?)?.toInt() ?? 7352;
+              final name = (obj['name'] as String?) ?? host;
+              final entry = DiscoveredServer(host: host, port: port, pcmPort: pcm, name: name);
+              if (!results.any((e) => e.host == entry.host && e.port == entry.port)) {
+                results.add(entry);
+              }
+            }
+          } catch (_) {}
+        }
+      });
+      while (DateTime.now().isBefore(endAt)) {
+        await Future.delayed(const Duration(milliseconds: 50));
+      }
+      socket.close();
+    } catch (_) {}
+    _found = results;
+    _discovering = false;
+    notifyListeners();
+    return results;
+  }
+
   Future<void> connectAndPlay() async {
     _retryTimer?.cancel();
     _retryAttempt = 0;
@@ -216,8 +275,9 @@ class PlayerController extends ChangeNotifier {
       if (_usePcm) {
         // Stop Opus player if running
         try { await _player.stop(); } catch (_) {}
+        final host = _safeHostFromUrl(_url) ?? '127.0.0.1';
         await _pcmChannel.invokeMethod('startPcm', {
-          'host': '127.0.0.1',
+          'host': host,
           'port': 7352,
           'sampleRate': 48000,
           'channels': 2,
@@ -257,8 +317,9 @@ class PlayerController extends ChangeNotifier {
           if (_usePcm && !_isConnecting) {
             try {
               if (DateTime.now().difference(_lastPcmStart) > const Duration(seconds: 30)) {
+                final host = _safeHostFromUrl(_url) ?? '127.0.0.1';
                 await _pcmChannel.invokeMethod('startPcm', {
-                  'host': '127.0.0.1',
+                  'host': host,
                   'port': 7352,
                   'sampleRate': 48000,
                   'channels': 2,
@@ -340,6 +401,25 @@ class PlayerController extends ChangeNotifier {
     _player.dispose();
     super.dispose();
   }
+
+  // Extract a host from a URL string safely; returns null if invalid.
+  String? _safeHostFromUrl(String url) {
+    try {
+      final u = Uri.parse(url);
+      return u.host.isNotEmpty ? u.host : null;
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+class DiscoveredServer {
+  final String host;
+  final int port;
+  final int pcmPort;
+  final String name;
+  DiscoveredServer({required this.host, required this.port, required this.pcmPort, required this.name});
+  String get opusUrl => 'http://$host:$port/stream.opus';
 }
 
 void main() {
@@ -433,19 +513,20 @@ class _HomePageState extends State<HomePage> {
                   Row(mainAxisSize: MainAxisSize.min, children: [
                     Switch(value: pc.usePcm, onChanged: (v) async { await pc.setUsePcm(v); }),
                     const SizedBox(width: 8),
-                    const Text('Low-latency (PCM over USB)')
+                    const Text('Low-latency (PCM)')
                   ]),
                 ],
               ),
               const SizedBox(height: 8),
               Row(
                 children: [
-                  const Text('USB URL', style: TextStyle(fontWeight: FontWeight.w600)),
+                  const Text('Server URL', style: TextStyle(fontWeight: FontWeight.w600)),
                   const SizedBox(width: 12),
                   Expanded(
                     child: TextField(
                       controller: _urlCtrl,
-                      enabled: _editing && !pc.usePcm,
+                      // Allow editing in both Opus and PCM modes; PCM uses the same host on port 7352
+                      enabled: _editing,
                       decoration: const InputDecoration(
                         hintText: kDefaultStreamUrl,
                         border: OutlineInputBorder(),
@@ -453,6 +534,8 @@ class _HomePageState extends State<HomePage> {
                       ),
                     ),
                   ),
+                  const SizedBox(width: 8),
+                  _DiscoverButton(),
                 ],
               ),
               const SizedBox(height: 12),
@@ -655,10 +738,63 @@ class _Controls extends StatelessWidget {
         ),
         const SizedBox(height: 8),
         const Text(
-          'Ensure USB debugging is enabled and the PC app has established adb reverse.',
+          'Tip: For Play Store use, connect over Wi‑Fi/LAN. Enter your PC\'s IP in Server URL. The PCM path will use the same host on port 7352.',
           textAlign: TextAlign.center,
         )
       ],
+    );
+  }
+}
+
+
+
+
+
+class _DiscoverButton extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    final pc = context.watch<PlayerController>();
+    return IconButton(
+      tooltip: pc.discovering ? 'Searching…' : 'Find PCs',
+      onPressed: pc.discovering
+          ? null
+          : () async {
+              final controller = context.read<PlayerController>();
+              await controller.discoverServers(timeout: const Duration(seconds: 1));
+              if (!context.mounted) return;
+              showModalBottomSheet(
+                context: context,
+                showDragHandle: true,
+                builder: (ctx) {
+                  final list = controller.foundServers;
+                  if (list.isEmpty) {
+                    return const Padding(
+                      padding: EdgeInsets.all(16),
+                      child: Text('No PCs found on your network. Ensure your PC and phone are on the same Wi‑Fi and firewall allows UDP 7531.'),
+                    );
+                  }
+                  return ListView.builder(
+                    itemCount: list.length,
+                    itemBuilder: (c, i) {
+                      final s = list[i];
+                      return ListTile(
+                        leading: const Icon(Icons.computer),
+                        title: Text(s.name),
+                        subtitle: Text('${s.host}  •  Opus:${s.port}  PCM:${s.pcmPort}'),
+                        onTap: () async {
+                          controller.setUrl(s.opusUrl);
+                          await controller.savePrefs();
+                          if (context.mounted) Navigator.of(context).pop();
+                        },
+                      );
+                    },
+                  );
+                },
+              );
+            },
+      icon: pc.discovering
+          ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+          : const Icon(Icons.wifi_find),
     );
   }
 }

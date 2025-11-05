@@ -48,7 +48,7 @@ class PcmService : Service() {
         }
         val notif: Notification = Notification.Builder(this, channelId)
             .setContentTitle("Audio streaming")
-            .setContentText("PCM over USB")
+            .setContentText("PCM stream")
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setOngoing(true)
             .build()
