@@ -1,4 +1,8 @@
 C:\AudioStreamer\audio_streamer\win_server\AudioStreamer.Server\bin\Release\net8.0-windows\AudioStreamer.Server.exe
+C:\AudioStreamer\audio_streamer\win_server\AudioStreamer.Server\bin\Release\net8.0-windows\AudioStreamer.Server.deps.json
+C:\AudioStreamer\audio_streamer\win_server\AudioStreamer.Server\bin\Release\net8.0-windows\AudioStreamer.Server.runtimeconfig.json
+C:\AudioStreamer\audio_streamer\win_server\AudioStreamer.Server\bin\Release\net8.0-windows\AudioStreamer.Server.dll
+C:\AudioStreamer\audio_streamer\win_server\AudioStreamer.Server\bin\Release\net8.0-windows\AudioStreamer.Server.pdb
 C:\AudioStreamer\audio_streamer\win_server\AudioStreamer.Server\bin\Release\net8.0-windows\Concentus.dll
 C:\AudioStreamer\audio_streamer\win_server\AudioStreamer.Server\bin\Release\net8.0-windows\NAudio.dll
 C:\AudioStreamer\audio_streamer\win_server\AudioStreamer.Server\bin\Release\net8.0-windows\NAudio.Asio.dll
@@ -17,9 +21,5 @@ C:\AudioStreamer\audio_streamer\win_server\AudioStreamer.Server\obj\Release\net8
 C:\AudioStreamer\audio_streamer\win_server\AudioStreamer.Server\obj\Release\net8.0-windows\AudioStreamer.Server.dll
 C:\AudioStreamer\audio_streamer\win_server\AudioStreamer.Server\obj\Release\net8.0-windows\refint\AudioStreamer.Server.dll
 C:\AudioStreamer\audio_streamer\win_server\AudioStreamer.Server\obj\Release\net8.0-windows\AudioStreamer.Server.pdb
-C:\AudioStreamer\audio_streamer\win_server\AudioStreamer.Server\bin\Release\net8.0-windows\AudioStreamer.Server.deps.json
-C:\AudioStreamer\audio_streamer\win_server\AudioStreamer.Server\bin\Release\net8.0-windows\AudioStreamer.Server.runtimeconfig.json
-C:\AudioStreamer\audio_streamer\win_server\AudioStreamer.Server\bin\Release\net8.0-windows\AudioStreamer.Server.dll
-C:\AudioStreamer\audio_streamer\win_server\AudioStreamer.Server\bin\Release\net8.0-windows\AudioStreamer.Server.pdb
 C:\AudioStreamer\audio_streamer\win_server\AudioStreamer.Server\obj\Release\net8.0-windows\AudioStreamer.Server.genruntimeconfig.cache
 C:\AudioStreamer\audio_streamer\win_server\AudioStreamer.Server\obj\Release\net8.0-windows\ref\AudioStreamer.Server.dll

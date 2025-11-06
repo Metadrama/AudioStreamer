@@ -14,8 +14,9 @@ Build
 - Or CLI: `dotnet build win_server/AudioStreamer.Server/AudioStreamer.Server.csproj -c Release`
 
 Run
-- Ensure `adb` is on PATH (`adb --version`).
+- Ensure `adb` is on PATH (`adb --version`) if you plan to use USB debugging (ADB reverse).
 - Run: `dotnet run --project win_server/AudioStreamer.Server -c Release`
+- By default, the server auto-applies `adb reverse` every ~15s for all connected devices (can be disabled via env below).
 - The server listens on `http://0.0.0.0:7350/stream.opus` (Opus) and `tcp://0.0.0.0:7352` (PCM).
   Use your PC's LAN IP (e.g., `http://192.168.1.50:7350/stream.opus`) in the Android app. PCM mode will use the same host on port 7352.
 
@@ -36,7 +37,7 @@ Environment Variables (optional)
 - `AUDIOSTREAMER_OPUS_RESTRICTED_LOWDELAY` (true/false, default false)
 - `AUDIOSTREAMER_DEVICE_ID` (optional) – WASAPI device ID to capture; defaults to system multimedia device
 - `AUDIOSTREAMER_SINGLE_CLIENT` (true/false, default true)
-- `AUDIOSTREAMER_ADB_REVERSE` (true/false, default true)
+- `AUDIOSTREAMER_ADB_REVERSE` (true/false, default true) — auto-apply `adb reverse` for HTTP/PCM ports
 
 Wi‑Fi/LAN setup
 - Ensure Windows Firewall allows inbound TCP on ports 7350 and 7352 for this app.

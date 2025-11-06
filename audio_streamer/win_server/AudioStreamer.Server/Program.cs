@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Buffers;
 using System.Runtime.InteropServices;
+using System.Buffers.Binary;
 using Concentus.Enums;
 using Concentus.Structs;
 using Microsoft.AspNetCore.Builder;
@@ -29,17 +30,21 @@ var liveConfig = new MutableConfig
     Port = port,
     PcmPort = pcmPort,
     Bitrate = GetEnvInt("AUDIOSTREAMER_BITRATE", 320_000),
-    FrameMs = GetEnvInt("AUDIOSTREAMER_FRAME_MS", 10),
+    FrameMs = GetEnvInt("AUDIOSTREAMER_FRAME_MS", 5),
     GainDb = GetEnvInt("AUDIOSTREAMER_GAIN_DB", 0),
     Normalize = GetEnvBool("AUDIOSTREAMER_NORMALIZE", false),
     TargetPeakDbfs = GetEnvInt("AUDIOSTREAMER_TARGET_PEAK_DBFS", -1),
     MaxBoostDb = GetEnvInt("AUDIOSTREAMER_MAX_BOOST_DB", 0),
-    FlushIntervalMs = GetEnvInt("AUDIOSTREAMER_FLUSH_INTERVAL_MS", 30),
-    OpusUseVbr = GetEnvBool("AUDIOSTREAMER_OPUS_USE_VBR", false),
+    // Lower flush interval for USB-tethered low-latency playback
+    FlushIntervalMs = GetEnvInt("AUDIOSTREAMER_FLUSH_INTERVAL_MS", 5),
+    OpusUseVbr = GetEnvBool("AUDIOSTREAMER_OPUS_USE_VBR", true),
     OpusVbrConstrained = GetEnvBool("AUDIOSTREAMER_OPUS_VBR_CONSTRAINED", true),
     OpusComplexity = GetEnvInt("AUDIOSTREAMER_OPUS_COMPLEXITY", 10),
-    OpusRestrictedLowDelay = GetEnvBool("AUDIOSTREAMER_OPUS_RESTRICTED_LOWDELAY", false),
+    // Favor restricted low delay by default to cut codec lookahead
+    OpusRestrictedLowDelay = GetEnvBool("AUDIOSTREAMER_OPUS_RESTRICTED_LOWDELAY", true),
     SingleClient = GetEnvBool("AUDIOSTREAMER_SINGLE_CLIENT", true),
+    // Disable ADB reverse by default to avoid implying USB debugging is required
+    // Default on so users don't need to run adb manually (can be disabled via env)
     AutoAdbReverse = GetEnvBool("AUDIOSTREAMER_ADB_REVERSE", true),
     DeviceId = Environment.GetEnvironmentVariable("AUDIOSTREAMER_DEVICE_ID") ?? string.Empty,
 };
@@ -267,8 +272,8 @@ class MutableConfig
         lock (_lock)
         {
             if (upd.Bitrate.HasValue) Bitrate = upd.Bitrate.Value;
-            if (upd.FrameMs.HasValue) FrameMs = upd.FrameMs.Value;
-            if (upd.FlushIntervalMs.HasValue) FlushIntervalMs = upd.FlushIntervalMs.Value;
+            if (upd.FrameMs.HasValue) FrameMs = Math.Clamp(upd.FrameMs.Value, 2, 60);
+            if (upd.FlushIntervalMs.HasValue) FlushIntervalMs = Math.Clamp(upd.FlushIntervalMs.Value, 1, 250);
             if (upd.OpusUseVbr.HasValue) OpusUseVbr = upd.OpusUseVbr.Value;
             if (upd.OpusComplexity.HasValue) OpusComplexity = Math.Clamp(upd.OpusComplexity.Value, 0, 10);
             if (upd.OpusRestrictedLowDelay.HasValue) OpusRestrictedLowDelay = upd.OpusRestrictedLowDelay.Value;
@@ -369,7 +374,8 @@ class CaptureManager
         // If available in newer Concentus, we can set SignalType and VBR constraints
         // Keep defaults here for compatibility. Avoid in-band FEC for minimal latency.
 
-        using var bufferedOut = new BufferedStream(output, 16384);
+        // Smaller buffer helps reduce tail latency when flushing frequently over USB/localhost
+        using var bufferedOut = new BufferedStream(output, 4096);
         using var ogg = new OggOpusStreamWriter(bufferedOut, 48000, 2);
         await bufferedOut.FlushAsync(ct); // push OpusHead/OpusTags immediately
 
@@ -450,9 +456,14 @@ class CaptureManager
                 {
                     ogg.WritePacket(packet, encoded, samplesPerFrame);
                 }
-                // Coalesce writes and flush periodically to reduce USB/HTTP overhead
+                // Coalesce writes and flush at low interval; for very low values, flush every packet
                 var nowMs = sw.ElapsedMilliseconds;
-                if (nowMs - lastFlushMs >= _cfg.FlushIntervalMs)
+                if (_cfg.FlushIntervalMs <= _cfg.FrameMs)
+                {
+                    await bufferedOut.FlushAsync(ct);
+                    lastFlushMs = nowMs;
+                }
+                else if (nowMs - lastFlushMs >= _cfg.FlushIntervalMs)
                 {
                     await bufferedOut.FlushAsync(ct);
                     lastFlushMs = nowMs;
@@ -533,12 +544,26 @@ class AdbReverseService : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         if (!_cfg.AutoAdbReverse) return;
+        Console.WriteLine("[adb] Auto reverse is ON (AUDIOSTREAMER_ADB_REVERSE=true)");
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                RunAdb($"reverse tcp:{_cfg.Port} tcp:{_cfg.Port}");
-                RunAdb($"reverse tcp:{_cfg.PcmPort} tcp:{_cfg.PcmPort}");
+                var serials = GetOnlineDevices();
+                if (serials.Count == 0)
+                {
+                    // Fallback to default device if exactly one is connected (adb will pick it)
+                    RunAdb($"reverse tcp:{_cfg.Port} tcp:{_cfg.Port}");
+                    RunAdb($"reverse tcp:{_cfg.PcmPort} tcp:{_cfg.PcmPort}");
+                }
+                else
+                {
+                    foreach (var s in serials)
+                    {
+                        RunAdb($"-s {s} reverse tcp:{_cfg.Port} tcp:{_cfg.Port}");
+                        RunAdb($"-s {s} reverse tcp:{_cfg.PcmPort} tcp:{_cfg.PcmPort}");
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -546,6 +571,50 @@ class AdbReverseService : BackgroundService
             }
             await Task.Delay(TimeSpan.FromSeconds(15), stoppingToken);
         }
+    }
+
+    private static List<string> GetOnlineDevices()
+    {
+        try
+        {
+            var output = RunAdbCapture("devices");
+            var lines = output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            var list = new List<string>();
+            foreach (var line in lines)
+            {
+                if (line.StartsWith("List of devices")) continue;
+                var parts = line.Split('\t');
+                if (parts.Length >= 2 && parts[1].Trim() == "device")
+                {
+                    list.Add(parts[0].Trim());
+                }
+            }
+            return list;
+        }
+        catch { return new List<string>(); }
+    }
+
+    private static string RunAdbCapture(string args)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = "adb",
+            Arguments = args,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        using var p = Process.Start(psi);
+        if (p == null) throw new Exception("Failed to start adb");
+        var stdout = p.StandardOutput.ReadToEnd();
+        var stderr = p.StandardError.ReadToEnd();
+        p.WaitForExit(5000);
+        if (p.ExitCode != 0 && !string.IsNullOrWhiteSpace(stderr))
+        {
+            Console.WriteLine($"[adb] {stderr.Trim()}");
+        }
+        return stdout;
     }
 
     private static void RunAdb(string args)
@@ -602,7 +671,6 @@ class PcmTcpServerService : BackgroundService
 
     private async Task HandleClientAsync(System.Net.Sockets.TcpClient client, CancellationToken ct)
     {
-        Console.WriteLine("[pcm] client connected");
         client.NoDelay = true;
         using var stream = client.GetStream();
         var snapshot = _live.Snapshot();
@@ -615,12 +683,16 @@ class PcmTcpServerService : BackgroundService
                 {
                     if (ClientGate.InUse)
                     {
-                        Console.WriteLine("[pcm] rejecting: single-client gate active");
+                        // Quietly reject when single-client gate is active to avoid log spam from probes
                         return;
                     }
                     ClientGate.InUse = true;
                     gateEntered = true;
                 }
+            }
+            if (gateEntered)
+            {
+                Console.WriteLine("[pcm] client connected");
             }
             await StreamPcmAsync(stream, snapshot, ct);
         }
@@ -633,9 +705,9 @@ class PcmTcpServerService : BackgroundService
             if (gateEntered)
             {
                 lock (ClientGate.Lock) ClientGate.InUse = false;
+                Console.WriteLine("[pcm] client disconnected");
             }
             client.Close();
-            Console.WriteLine("[pcm] client disconnected");
         }
     }
 
@@ -659,8 +731,10 @@ class PcmTcpServerService : BackgroundService
         var buffered = new BufferedWaveProvider(capture.WaveFormat)
         {
             DiscardOnBufferOverflow = true,
-            BufferDuration = TimeSpan.FromMilliseconds(80),
-            ReadFully = false
+            // Larger buffer to absorb scheduling/USB jitter without audible gaps
+            BufferDuration = TimeSpan.FromMilliseconds(120),
+            // Ensure reads are filled (zeros on underflow) to avoid micro-stutters
+            ReadFully = true
         };
         capture.DataAvailable += (s, a) => buffered.AddSamples(a.Buffer, 0, a.BytesRecorded);
         capture.StartRecording();
@@ -679,36 +753,27 @@ class PcmTcpServerService : BackgroundService
         var shortBuf = new short[frameSamplesInterleaved];
         var byteBuf = new byte[frameSamplesInterleaved * 2];
 
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-        long due = sw.ElapsedMilliseconds;
         float lastL = 0f, lastR = 0f;
+        long totalSamples = 0;
+        var header = new byte[sizeof(long)];
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var frameDuration = TimeSpan.FromMilliseconds(10);
+        TimeSpan nextDue = TimeSpan.Zero;
         try
         {
             while (!ct.IsCancellationRequested)
             {
                 int read = 0;
-                int zeroReads = 0;
                 while (read < floatBuf.Length && !ct.IsCancellationRequested)
                 {
                     int n = sampleProvider.Read(floatBuf, read, floatBuf.Length - read);
-                    if (n == 0)
-                    {
-                        if (zeroReads < 8)
-                        {
-                            zeroReads++;
-                            await Task.Delay(1, ct);
-                            continue;
-                        }
-                        for (int i = read; i < floatBuf.Length; i += 2)
-                        {
-                            floatBuf[i] = lastL;
-                            floatBuf[i + 1] = lastR;
-                        }
-                        read = floatBuf.Length;
-                        break;
-                    }
-                    zeroReads = 0;
+                    if (n <= 0) break;
                     read += n;
+                }
+                if (read < floatBuf.Length)
+                {
+                    // Safety pad; ReadFully=true should generally prevent this
+                    Array.Clear(floatBuf, read, floatBuf.Length - read);
                 }
 
                 // convert with fixed gain + peak limiter (attenuation only)
@@ -735,12 +800,18 @@ class PcmTcpServerService : BackgroundService
                 Buffer.BlockCopy(shortBuf, 0, byteBuf, 0, byteBuf.Length);
                 lastL = floatBuf[floatBuf.Length - 2];
                 lastR = floatBuf[floatBuf.Length - 1];
+                BinaryPrimitives.WriteInt64LittleEndian(header, totalSamples);
+                await output.WriteAsync(header, 0, header.Length, ct);
                 await output.WriteAsync(byteBuf, 0, byteBuf.Length, ct);
-                await output.FlushAsync(ct);
+                totalSamples += samplesPerFrame;
 
-                due += 10;
-                int sleep = (int)(due - sw.ElapsedMilliseconds);
-                if (sleep > 0) await Task.Delay(sleep, ct);
+                // Pace writes to real time (10ms per frame)
+                nextDue += frameDuration;
+                var sleep = nextDue - sw.Elapsed;
+                if (sleep > TimeSpan.Zero)
+                {
+                    try { await Task.Delay(sleep, ct); } catch (TaskCanceledException) { }
+                }
             }
         }
         finally

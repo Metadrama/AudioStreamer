@@ -2,6 +2,18 @@ Changelog
 
 All notable changes to this project are documented here.
 
+0.5.0 – Wi‑Fi/LAN support + discovery (2025‑11‑05)
+- Added
+  - End‑to‑end Wi‑Fi/LAN support: Windows server now binds Opus HTTP and PCM TCP listeners to 0.0.0.0 so phones can connect over the local network.
+  - Automatic discovery: new UDP discovery responder on the Windows server (UDP 7531) and a matching Android client scan that broadcasts a probe and lists available PCs. New “Find PCs” button in the app.
+  - Android 13+ notifications permission (POST_NOTIFICATIONS) request flow before starting the foreground PCM service.
+- Changed
+  - Android PCM path now uses the host from the configured Server URL (port 7352) instead of hard‑coded 127.0.0.1.
+  - PcmService notification text tweaked to "PCM stream".
+  - UI text: “USB URL” → “Server URL”; “Low‑latency (PCM over USB)” → “Low‑latency (PCM)”. Server URL is always editable and a Discover button was added.
+  - Windows server startup logs and README updated to reflect 0.0.0.0 bindings and LAN usage tips.
+  - Console tips now suggest entering the PC’s LAN IP on the phone instead of relying on adb reverse.
+
 0.4.0 – Ultra‑Low‑Latency PCM (2025‑11‑03)
 - Added PCM over TCP for ultra‑low‑latency playback
   - Windows server: new TCP listener on tcp://127.0.0.1:7352 streaming 48 kHz, stereo, 16‑bit PCM in 10 ms frames.
@@ -65,4 +77,9 @@ Known Issues / Next
 - Optional diagnostics panel: jitter/latency estimate from AudioTrack queued frames.
 - Convert server Ogg/Opus writes to fully async (remove AllowSynchronousIO) once validated.
 - Optional tray UI for Windows server (start/stop, bitrate/frame presets, device status).
-
+0.2.1 — Remove USB Tethering, Restore Settings (2025-11-06)
+- Removed USB tethering mode and related binding logic.
+- Restored a dedicated Settings screen; moved audio/codec preferences there.
+- Added Advanced section for USB debugging (ADB reverse) with Verify button.
+- Simplified main screen; always allow editing Server URL and discovery.
+- Windows server: enable auto `adb reverse` by default; applies to all connected devices every ~15s (disable via `AUDIOSTREAMER_ADB_REVERSE=false`).
