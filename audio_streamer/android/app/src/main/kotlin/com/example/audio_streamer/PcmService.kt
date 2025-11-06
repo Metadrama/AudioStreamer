@@ -123,9 +123,9 @@ class PcmService : Service() {
                         AudioFormat.CHANNEL_OUT_MONO else AudioFormat.CHANNEL_OUT_STEREO
                     val audioFormat = if (bits == 16) AudioFormat.ENCODING_PCM_16BIT else AudioFormat.ENCODING_PCM_8BIT
                     val minBuf = AudioTrack.getMinBufferSize(sampleRate, channelConfig, audioFormat)
-                    // Favor stability: ensure at least 2x platform min buffer or targetMs, whichever is larger
+                    // Ultra-low-latency path: keep device buffer close to targetMs, but never below platform minimum
                     val targetBytes = sampleRate * channels * (bits / 8) * targetMs / 1000
-                    val desiredBuf = maxOf(minBuf * 2, targetBytes)
+                    val desiredBuf = maxOf(minBuf, targetBytes)
 
                     track = if (Build.VERSION.SDK_INT >= 29) {
                         AudioTrack.Builder()
@@ -245,6 +245,7 @@ class PcmService : Service() {
                     track.play()
                     var playbackBaseRemote = last!!.remoteSamples
                     var lastSpeed = 1.0f
+                    var lastSpeedChangeNs = 0L
                     if (!sentConnected) {
                         sentConnected = true
                         MainActivity.sendPcmEvent("connected")
@@ -264,7 +265,8 @@ class PcmService : Service() {
                             emptyPolls = 0
                         }
 
-                        val data = if (frame === last) zeroBuf else frame.data
+                        // Gap concealment: prefer last-frame repeat over silence to avoid clicks at ultra-low latency
+                        val data = if (frame === last) (last?.data ?: zeroBuf) else frame.data
                         var off = 0
                         while (off < data.size && running.get()) {
                             val remaining = data.size - off
@@ -285,22 +287,30 @@ class PcmService : Service() {
                         val played = track.playbackHeadPosition.toLong()
                         val queueSamples = latestRemote - baseRemote - played
                         val targetSamples = prefill.toLong() * samplesPerFrame.toLong()
-                        // Less aggressive drift correction: adjust only beyond ~2.5 frames and with +/-1%
-                        val threshold = (samplesPerFrame.toLong() * 5L) / 2L
-                        val desiredSpeed = when {
-                            queueSamples - targetSamples > threshold -> 1.01f
-                            queueSamples - targetSamples < -threshold -> 0.99f
+                        // For ultra-low targets (<= ~20 ms), avoid frequent speed changes which can be audible.
+                        val allowSpeedAdjust = prefill > 2
+                        // Wider threshold and smaller adjustment to reduce churn
+                        val threshold = samplesPerFrame.toLong() * 4L // ~4 frames
+                        val desiredSpeed = if (!allowSpeedAdjust) 1.0f else when {
+                            queueSamples - targetSamples > threshold -> 1.005f
+                            queueSamples - targetSamples < -threshold -> 0.995f
                             else -> 1.0f
                         }
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                            if (abs(desiredSpeed - lastSpeed) >= 0.01f) {
-                                try {
-                                    val params = track.playbackParams
-                                    if (abs(params.speed - desiredSpeed) >= 0.01f) {
-                                        track.playbackParams = params.setSpeed(desiredSpeed)
-                                    }
-                                    lastSpeed = desiredSpeed
-                                } catch (_: Throwable) {}
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && allowSpeedAdjust) {
+                            if (abs(desiredSpeed - lastSpeed) >= 0.005f) {
+                                val now = try { System.nanoTime() } catch (_: Throwable) { 0L }
+                                // Minimum interval between speed changes to add hysteresis (~250 ms)
+                                val okToChange = (now == 0L) || (now - lastSpeedChangeNs > 250_000_000L)
+                                if (okToChange) {
+                                    try {
+                                        val params = track.playbackParams
+                                        if (abs(params.speed - desiredSpeed) >= 0.005f) {
+                                            track.playbackParams = params.setSpeed(desiredSpeed)
+                                        }
+                                        lastSpeed = desiredSpeed
+                                        if (now != 0L) lastSpeedChangeNs = now
+                                    } catch (_: Throwable) {}
+                                }
                             }
                         }
 

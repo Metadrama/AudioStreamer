@@ -148,7 +148,7 @@ class PlayerController extends ChangeNotifier {
   }
 
   Future<void> setPcmBufPreset(int preset) async {
-    _pcmBufPreset = preset.clamp(0, 2);
+    _pcmBufPreset = preset.clamp(0, 3);
     await savePrefs();
     notifyListeners();
   }
@@ -202,6 +202,9 @@ class PlayerController extends ChangeNotifier {
     switch (preset) {
       case 0:
         return const _PcmPreset(targetMs: 40, prefillFrames: 4, capacity: 12);
+      case 3:
+        // Ultra-low latency (experimental): ~10 ms target, 1 frame prefill
+        return const _PcmPreset(targetMs: 10, prefillFrames: 1, capacity: 16);
       case 2:
         return const _PcmPreset(targetMs: 80, prefillFrames: 8, capacity: 24);
       default:
@@ -716,6 +719,7 @@ class _HomePageState extends State<HomePage> {
                   DropdownButton<int>(
                     value: pc.pcmBufPreset,
                     items: const [
+                      DropdownMenuItem(value: 3, child: Text('Ultra (~10 ms, USB/debugging recommended)')),
                       DropdownMenuItem(value: 0, child: Text('Low (~40 ms)')),
                       DropdownMenuItem(value: 1, child: Text('Normal (~60 ms)')),
                       DropdownMenuItem(value: 2, child: Text('High (~80 ms)')),
