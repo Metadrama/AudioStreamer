@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'dart:io';
@@ -29,7 +30,6 @@ class PlayerController extends ChangeNotifier {
 
   final _statusController = StreamController<String>.broadcast();
   
-  // State variables
   ConnectionStatus _status = ConnectionStatus.idle;
   String _url = kDefaultStreamUrl;
   bool _autoConnect = true;
@@ -39,7 +39,6 @@ class PlayerController extends ChangeNotifier {
   Timer? _retryTimer;
   Timer? _healthTimer;
   
-  // Settings
   int _prefBitrate = 320000;
   int _prefFrameMs = 5;
   int _prefFlushMs = 10;
@@ -49,12 +48,10 @@ class PlayerController extends ChangeNotifier {
   int _pcmBufPreset = 1;
   bool _usbDevMode = false;
   
-  // Discovery
   bool _discovering = false;
   List<DiscoveredServer> _found = [];
   int? _selectedPcmPort;
 
-  // Getters
   ConnectionStatus get status => _status;
   Stream<String> get statusStream => _statusController.stream;
   String get url => _url;
@@ -78,10 +75,7 @@ class PlayerController extends ChangeNotifier {
     _setupPlayerListeners();
     _startHealthMonitor();
     _refreshDevices();
-    
-    if (_autoConnect) {
-      connectAndPlay();
-    }
+    if (_autoConnect) connectAndPlay();
   }
 
   void _setupMethodChannel() {
@@ -91,22 +85,11 @@ class PlayerController extends ChangeNotifier {
         final type = args?['type'] as String?;
         final msg = args?['message'] as String?;
         _pcmMessage = msg;
-        
         switch (type) {
-          case 'connected':
-            _updateStatus(ConnectionStatus.streaming, 'Streaming (Low Latency)');
-            _retryAttempt = 0;
-            break;
-          case 'disconnected':
-            _updateStatus(ConnectionStatus.connecting, 'Signal Lost. Retrying...');
-            break;
-          case 'error':
-            _updateStatus(ConnectionStatus.error, msg ?? 'PCM Error');
-            _scheduleReconnect();
-            break;
-          case 'connecting':
-            _updateStatus(ConnectionStatus.connecting, 'Establishing Link...');
-            break;
+          case 'connected': _updateStatus(ConnectionStatus.streaming, 'HYPER-LINK ACTIVE'); _retryAttempt = 0; break;
+          case 'disconnected': _updateStatus(ConnectionStatus.connecting, 'RE-SYNCING...'); break;
+          case 'error': _updateStatus(ConnectionStatus.error, msg ?? 'PCM ERROR'); _scheduleReconnect(); break;
+          case 'connecting': _updateStatus(ConnectionStatus.connecting, 'INITIALIZING...'); break;
         }
       }
     });
@@ -114,31 +97,23 @@ class PlayerController extends ChangeNotifier {
 
   void _setupPlayerListeners() {
     _player.playerStateStream.listen((state) {
-      if (_usePcm) return; // Ignore if in PCM mode
-      
+      if (_usePcm) return;
       switch (state.processingState) {
-        case ProcessingState.idle:
-          _updateStatus(ConnectionStatus.idle, 'Ready');
-          break;
+        case ProcessingState.idle: _updateStatus(ConnectionStatus.idle, 'STANDBY'); break;
         case ProcessingState.loading:
-        case ProcessingState.buffering:
-          _updateStatus(ConnectionStatus.connecting, 'Buffering...');
-          break;
+        case ProcessingState.buffering: _updateStatus(ConnectionStatus.connecting, 'BUFFERING'); break;
         case ProcessingState.ready:
           if (state.playing) {
-            _updateStatus(ConnectionStatus.streaming, 'Streaming (Opus)');
+            _updateStatus(ConnectionStatus.streaming, 'STREAMING OPUS');
             _retryAttempt = 0;
           } else {
-            _updateStatus(ConnectionStatus.idle, 'Paused');
+            _updateStatus(ConnectionStatus.idle, 'PAUSED');
           }
           break;
-        case ProcessingState.completed:
-          _updateStatus(ConnectionStatus.idle, 'Finished');
-          _scheduleReconnect();
-          break;
+        case ProcessingState.completed: _updateStatus(ConnectionStatus.idle, 'FINISHED'); _scheduleReconnect(); break;
       }
     }, onError: (e) {
-      _updateStatus(ConnectionStatus.error, 'Player Error: $e');
+      _updateStatus(ConnectionStatus.error, 'NODE FAILURE: $e');
       _scheduleReconnect();
     });
   }
@@ -185,11 +160,7 @@ class PlayerController extends ChangeNotifier {
     notifyListeners();
   }
 
-  void setAutoConnect(bool value) {
-    _autoConnect = value;
-    savePrefs();
-    notifyListeners();
-  }
+  void setAutoConnect(bool value) { _autoConnect = value; savePrefs(); notifyListeners(); }
 
   Future<void> setUsePcm(bool value) async {
     _usePcm = value;
@@ -203,17 +174,13 @@ class PlayerController extends ChangeNotifier {
     _pcmBufPreset = preset;
     await savePrefs();
     notifyListeners();
-    if (_status == ConnectionStatus.streaming) {
-      await connectAndPlay(); // Restart to apply
-    }
+    if (_status == ConnectionStatus.streaming) await connectAndPlay();
   }
 
   Future<void> connectAndPlay() async {
     if (_status == ConnectionStatus.connecting && _retryAttempt == 0) return;
-    
     _retryTimer?.cancel();
-    _updateStatus(ConnectionStatus.connecting, 'Connecting...');
-    
+    _updateStatus(ConnectionStatus.connecting, 'CONNECTING...');
     try {
       if (_usePcm) {
         await _player.stop();
@@ -235,7 +202,7 @@ class PlayerController extends ChangeNotifier {
         await _player.play();
       }
     } catch (e) {
-      _updateStatus(ConnectionStatus.error, 'Connect Failed: $e');
+      _updateStatus(ConnectionStatus.error, 'LINK FAILED: $e');
       _scheduleReconnect();
     }
   }
@@ -244,21 +211,17 @@ class PlayerController extends ChangeNotifier {
     if (!_autoConnect) return;
     _retryTimer?.cancel();
     _retryAttempt++;
-    
     final delay = Duration(seconds: _retryAttempt.clamp(1, 10) * 2);
-    _statusController.add('Retrying in ${delay.inSeconds}s...');
-    
+    _statusController.add('RETRY IN ${delay.inSeconds}S...');
     _retryTimer = Timer(delay, () => connectAndPlay());
   }
 
   Future<void> stop() async {
     _retryTimer?.cancel();
     _retryAttempt = 0;
-    if (_usePcm) {
-      await _pcmChannel.invokeMethod('stopPcm');
-    }
+    if (_usePcm) await _pcmChannel.invokeMethod('stopPcm');
     await _player.stop();
-    _updateStatus(ConnectionStatus.idle, 'Stopped');
+    _updateStatus(ConnectionStatus.idle, 'HALTED');
   }
 
   void _startHealthMonitor() {
@@ -266,21 +229,13 @@ class PlayerController extends ChangeNotifier {
     int failCount = 0;
     _healthTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
       if (_status != ConnectionStatus.streaming && _status != ConnectionStatus.connecting) return;
-      
       try {
         final uri = _extractConfigUri(_url);
         final resp = await http.get(uri).timeout(const Duration(seconds: 2));
-        if (resp.statusCode == 200) {
-          failCount = 0;
-        } else {
-          failCount++;
-        }
-      } catch (_) {
-        failCount++;
-      }
-
+        if (resp.statusCode == 200) failCount = 0; else failCount++;
+      } catch (_) { failCount++; }
       if (failCount >= 3) {
-        _updateStatus(ConnectionStatus.error, 'Server Offline');
+        _updateStatus(ConnectionStatus.error, 'NODE OFFLINE');
         _scheduleReconnect();
       }
     });
@@ -290,22 +245,12 @@ class PlayerController extends ChangeNotifier {
     _discovering = true;
     _found = [];
     notifyListeners();
-    
     try {
       final socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
       socket.broadcastEnabled = true;
       final data = convert.utf8.encode('AUDSTRM_DISCOVER_V1');
-      
-      final bcasts = [
-        InternetAddress('255.255.255.255'),
-        InternetAddress('192.168.1.255'),
-        InternetAddress('192.168.0.255'),
-      ];
-      
-      for (final addr in bcasts) {
-        socket.send(data, addr, 7531);
-      }
-
+      final bcasts = [InternetAddress('255.255.255.255'), InternetAddress('192.168.1.255'), InternetAddress('192.168.0.255')];
+      for (final addr in bcasts) socket.send(data, addr, 7531);
       socket.listen((evt) {
         if (evt == RawSocketEvent.read) {
           final d = socket.receive();
@@ -315,42 +260,21 @@ class PlayerController extends ChangeNotifier {
             if (msg.startsWith('AUDSTRM_OK_V1 ')) {
               final jsonStr = msg.substring('AUDSTRM_OK_V1 '.length);
               final obj = convert.jsonDecode(jsonStr) as Map<String, dynamic>;
-              final entry = DiscoveredServer(
-                host: d.address.address,
-                port: obj['port'] ?? 7350,
-                pcmPort: obj['pcm'] ?? 7352,
-                name: obj['name'] ?? d.address.address,
-              );
-              if (!_found.any((e) => e.host == entry.host)) {
-                _found.add(entry);
-                notifyListeners();
-              }
+              final entry = DiscoveredServer(host: d.address.address, port: obj['port'] ?? 7350, pcmPort: obj['pcm'] ?? 7352, name: obj['name'] ?? d.address.address);
+              if (!_found.any((e) => e.host == entry.host)) { _found.add(entry); notifyListeners(); }
             }
           } catch (_) {}
         }
       });
-
       await Future.delayed(const Duration(seconds: 2));
       socket.close();
     } catch (_) {}
-    
     _discovering = false;
     notifyListeners();
   }
 
-  String _extractHost(String url) {
-    try { return Uri.parse(url).host; } catch (_) { return '127.0.0.1'; }
-  }
-
-  Uri _extractConfigUri(String url) {
-    try {
-      final u = Uri.parse(url);
-      return Uri(scheme: u.scheme, host: u.host, port: u.port, path: '/config');
-    } catch (_) {
-      return Uri.parse('http://127.0.0.1:7350/config');
-    }
-  }
-
+  String _extractHost(String url) { try { return Uri.parse(url).host; } catch (_) { return '127.0.0.1'; } }
+  Uri _extractConfigUri(String url) { try { final u = Uri.parse(url); return Uri(scheme: u.scheme, host: u.host, port: u.port, path: '/config'); } catch (_) { return Uri.parse('http://127.0.0.1:7350/config'); } }
   _PcmPreset _getPcmPreset(int preset) {
     switch (preset) {
       case 0: return const _PcmPreset(targetMs: 40, prefillFrames: 4, capacity: 12);
@@ -364,10 +288,7 @@ class PlayerController extends ChangeNotifier {
     try {
       final uri = _extractConfigUri(_url).replace(path: '/devices');
       final resp = await http.get(uri).timeout(const Duration(seconds: 2));
-      if (resp.statusCode == 200) {
-        _devices = (convert.jsonDecode(resp.body) as List).cast<Map<String, dynamic>>();
-        notifyListeners();
-      }
+      if (resp.statusCode == 200) { _devices = (convert.jsonDecode(resp.body) as List).cast<Map<String, dynamic>>(); notifyListeners(); }
     } catch (_) {}
   }
 
@@ -379,46 +300,22 @@ class PlayerController extends ChangeNotifier {
 
   Future<bool> applyServerConfig() async {
     final uri = _extractConfigUri(_url);
-    final body = {
-      'bitrate': _prefBitrate,
-      'frame_ms': _prefFrameMs,
-      'flush_ms': _prefFlushMs,
-      if (_prefDeviceId != null) 'device_id': _prefDeviceId,
-      'gain_db': _prefGainDb,
-    };
+    final body = { 'bitrate': _prefBitrate, 'frame_ms': _prefFrameMs, 'flush_ms': _prefFlushMs, if (_prefDeviceId != null) 'device_id': _prefDeviceId, 'gain_db': _prefGainDb };
     try {
       final resp = await http.post(uri, headers: {'Content-Type': 'application/json'}, body: convert.jsonEncode(body));
-      if (resp.statusCode == 200) {
-        connectAndPlay();
-        return true;
-      }
+      if (resp.statusCode == 200) { connectAndPlay(); return true; }
     } catch (_) {}
     return false;
   }
 }
 
-class DiscoveredServer {
-  final String host;
-  final int port;
-  final int pcmPort;
-  final String name;
-  DiscoveredServer({required this.host, required this.port, required this.pcmPort, required this.name});
-}
+class DiscoveredServer { final String host; final int port; final int pcmPort; final String name; DiscoveredServer({required this.host, required this.port, required this.pcmPort, required this.name}); }
+class _PcmPreset { final int targetMs; final int prefillFrames; final int capacity; const _PcmPreset({required this.targetMs, required this.prefillFrames, required this.capacity}); }
 
-class _PcmPreset {
-  final int targetMs;
-  final int prefillFrames;
-  final int capacity;
-  const _PcmPreset({required this.targetMs, required this.prefillFrames, required this.capacity});
-}
-
-void main() {
-  runApp(const MainApp());
-}
+void main() { runApp(const MainApp()); }
 
 class MainApp extends StatelessWidget {
   const MainApp({super.key});
-
   @override
   Widget build(BuildContext context) {
     return ChangeNotifierProvider(
@@ -428,15 +325,12 @@ class MainApp extends StatelessWidget {
         debugShowCheckedModeBanner: false,
         theme: ThemeData(
           useMaterial3: true,
-          colorScheme: ColorScheme.fromSeed(
-            seedColor: Colors.cyan,
-            brightness: Brightness.dark,
-            surface: const Color(0xFF121212),
-          ),
-          cardTheme: CardThemeData(
-            elevation: 0,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-            color: Colors.white.withOpacity(0.05),
+          brightness: Brightness.dark,
+          scaffoldBackgroundColor: const Color(0xFF080808),
+          colorScheme: ColorScheme.fromSeed(seedColor: Colors.cyanAccent, brightness: Brightness.dark, surface: const Color(0xFF0F0F0F)),
+          textTheme: const TextTheme(
+            displayLarge: TextStyle(fontFamily: 'monospace', fontWeight: FontWeight.bold, letterSpacing: 2),
+            bodyMedium: TextStyle(fontFamily: 'monospace', letterSpacing: 0.5),
           ),
         ),
         home: const AppShell(),
@@ -447,33 +341,36 @@ class MainApp extends StatelessWidget {
 
 class AppShell extends StatefulWidget {
   const AppShell({super.key});
-
   @override
   State<AppShell> createState() => _AppShellState();
 }
 
 class _AppShellState extends State<AppShell> {
   int _selectedIndex = 0;
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: IndexedStack(
-        index: _selectedIndex,
-        children: const [
-          HomePage(),
-          DiscoveryPage(),
-          SettingsPage(),
-        ],
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: RadialGradient(center: Alignment.topRight, radius: 1.5, colors: [Color(0xFF1A1F25), Color(0xFF080808)]),
+        ),
+        child: IndexedStack(index: _selectedIndex, children: const [HomePage(), DiscoveryPage(), SettingsPage()]),
       ),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: _selectedIndex,
-        onDestinationSelected: (i) => setState(() => _selectedIndex = i),
-        destinations: const [
-          NavigationDestination(icon: Icon(Icons.home_outlined), selectedIcon: Icon(Icons.home), label: 'Home'),
-          NavigationDestination(icon: Icon(Icons.search), selectedIcon: Icon(Icons.manage_search), label: 'Discover'),
-          NavigationDestination(icon: Icon(Icons.settings_outlined), selectedIcon: Icon(Icons.settings), label: 'Settings'),
-        ],
+      bottomNavigationBar: ClipRect(
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+          child: NavigationBar(
+            backgroundColor: Colors.black.withOpacity(0.5),
+            indicatorColor: Colors.cyanAccent.withOpacity(0.2),
+            selectedIndex: _selectedIndex,
+            onDestinationSelected: (i) => setState(() => _selectedIndex = i),
+            destinations: const [
+              NavigationDestination(icon: Icon(Icons.hub_outlined, color: Colors.white54), selectedIcon: Icon(Icons.hub, color: Colors.cyanAccent), label: 'NODE'),
+              NavigationDestination(icon: Icon(Icons.radar_outlined, color: Colors.white54), selectedIcon: Icon(Icons.radar, color: Colors.cyanAccent), label: 'SCAN'),
+              NavigationDestination(icon: Icon(Icons.settings_input_component_outlined, color: Colors.white54), selectedIcon: Icon(Icons.settings_input_component, color: Colors.cyanAccent), label: 'CORE'),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -481,270 +378,261 @@ class _AppShellState extends State<AppShell> {
 
 class HomePage extends StatelessWidget {
   const HomePage({super.key});
-
   @override
   Widget build(BuildContext context) {
     final pc = context.watch<PlayerController>();
-    
     return Scaffold(
-      body: CustomScrollView(
-        slivers: [
-          const SliverAppBar.large(
-            title: Text('AudioStreamer', style: TextStyle(fontWeight: FontWeight.bold)),
-          ),
-          SliverPadding(
-            padding: const EdgeInsets.all(24),
-            sliver: SliverList(
-              delegate: SliverChildListDelegate([
-                _buildStatusCore(pc),
-                const SizedBox(height: 32),
-                _buildModeToggle(pc),
-                const SizedBox(height: 16),
-                _buildConnectionInfo(pc),
-              ]),
-            ),
-          ),
-        ],
-      ),
-      floatingActionButton: FloatingActionButton.large(
-        onPressed: () => pc.status == ConnectionStatus.streaming ? pc.stop() : pc.connectAndPlay(),
-        backgroundColor: pc.status == ConnectionStatus.streaming ? Colors.redAccent : Theme.of(context).colorScheme.primary,
-        child: Icon(
-          pc.status == ConnectionStatus.streaming ? Icons.stop : Icons.play_arrow,
-          size: 40,
-        ),
-      ),
-    );
-  }
-
-  Widget _buildStatusCore(PlayerController pc) {
-    Color color;
-    IconData icon;
-    switch (pc.status) {
-      case ConnectionStatus.streaming:
-        color = Colors.cyanAccent;
-        icon = Icons.waves;
-        break;
-      case ConnectionStatus.connecting:
-        color = Colors.orangeAccent;
-        icon = Icons.sync;
-        break;
-      case ConnectionStatus.error:
-        color = Colors.redAccent;
-        icon = Icons.error_outline;
-        break;
-      case ConnectionStatus.idle:
-      default:
-        color = Colors.white38;
-        icon = Icons.power_settings_new;
-    }
-
-    return Center(
-      child: Column(
-        children: [
-          Container(
-            width: 200,
-            height: 200,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: color.withOpacity(0.1),
-              border: Border.all(color: color.withOpacity(0.3), width: 2),
-              boxShadow: [
-                if (pc.status == ConnectionStatus.streaming)
-                  BoxShadow(color: color.withOpacity(0.2), blurRadius: 40, spreadRadius: 5),
-              ],
-            ),
-            child: Icon(icon, size: 80, color: color),
-          ),
-          const SizedBox(height: 24),
-          StreamBuilder<String>(
-            stream: pc.statusStream,
-            initialData: 'Idle',
-            builder: (context, snap) {
-              return Text(
-                snap.data ?? 'Idle',
-                style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-              );
-            },
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildModeToggle(PlayerController pc) {
-    return Card(
-      child: ListTile(
-        title: const Text('Low Latency Mode'),
-        subtitle: const Text('High-performance PCM stream'),
-        trailing: Switch(
-          value: pc.usePcm,
-          onChanged: (v) => pc.setUsePcm(v),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildConnectionInfo(PlayerController pc) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(20),
+      backgroundColor: Colors.transparent,
+      body: SafeArea(
         child: Column(
           children: [
-            _infoRow(Icons.link, 'Host', pc.url),
-            if (pc.usePcm) ...[
-              const Divider(height: 32, color: Colors.white10),
-              _infoRow(Icons.memory, 'Buffer', '${pc.pcmBufPreset == 3 ? "Ultra" : pc.pcmBufPreset == 0 ? "Low" : "Normal"}'),
-            ],
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 24),
+              child: Text('NEURAL AUDIO LINK', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, letterSpacing: 4, color: Colors.white24)),
+            ),
+            Expanded(child: Center(child: _buildMainControl(pc))),
+            _buildQuickStats(pc),
+            const SizedBox(height: 100),
           ],
         ),
       ),
     );
   }
 
-  Widget _infoRow(IconData icon, String label, String value) {
+  Widget _buildMainControl(PlayerController pc) {
+    bool active = pc.status == ConnectionStatus.streaming;
+    bool connecting = pc.status == ConnectionStatus.connecting;
+    Color glowColor = active ? Colors.cyanAccent : (connecting ? Colors.orangeAccent : (pc.status == ConnectionStatus.error ? Colors.redAccent : Colors.white10));
+
+    return GestureDetector(
+      onTap: () => active ? pc.stop() : pc.connectAndPlay(),
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          // Outer Glow
+          AnimatedContainer(
+            duration: const Duration(milliseconds: 500),
+            width: active ? 280 : 240,
+            height: active ? 280 : 240,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              boxShadow: [BoxShadow(color: glowColor.withOpacity(active ? 0.2 : 0.05), blurRadius: 60, spreadRadius: 10)],
+            ),
+          ),
+          // Main Ring
+          Container(
+            width: 220,
+            height: 220,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(color: glowColor.withOpacity(0.3), width: 1),
+              gradient: LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [Colors.white.withOpacity(0.1), Colors.transparent]),
+            ),
+            child: ClipOval(
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
+                child: Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(active ? Icons.stop_rounded : Icons.play_arrow_rounded, size: 80, color: glowColor),
+                      const SizedBox(height: 8),
+                      StreamBuilder<String>(
+                        stream: pc.statusStream,
+                        initialData: 'READY',
+                        builder: (context, snap) => Text(snap.data!.toUpperCase(), style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, letterSpacing: 2, color: glowColor)),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+          // Orbital dots (visual flair)
+          if (active || connecting) _OrbitalPulse(color: glowColor),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildQuickStats(PlayerController pc) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 32),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(20),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+          child: Container(
+            padding: const EdgeInsets.all(20),
+            color: Colors.white.withOpacity(0.03),
+            child: Column(
+              children: [
+                _statItem('HOST', pc.url.split('://').last.split('/').first, Icons.dns_outlined),
+                const Divider(height: 24, color: Colors.white10),
+                _statItem('MODE', pc.usePcm ? 'NATIVE-PCM' : 'OPUS-NET', Icons.Bolt),
+                const Divider(height: 24, color: Colors.white10),
+                _statItem('JITTER', '${pc.pcmBufPreset == 3 ? "ULTRA" : pc.pcmBufPreset == 0 ? "LOW" : "STABLE"}', Icons.waves),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _statItem(String label, String value, IconData icon) {
     return Row(
       children: [
-        Icon(icon, size: 20, color: Colors.white38),
+        Icon(icon, size: 16, color: Colors.white24),
         const SizedBox(width: 12),
-        Text(label, style: const TextStyle(color: Colors.white38)),
+        Text(label, style: const TextStyle(fontSize: 10, color: Colors.white24, fontWeight: FontWeight.bold, letterSpacing: 1)),
         const Spacer(),
-        Text(value, style: const TextStyle(fontWeight: FontWeight.w600)),
+        Expanded(child: Text(value, textAlign: TextAlign.right, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white70, overflow: TextOverflow.ellipsis))),
       ],
+    );
+  }
+}
+
+class _OrbitalPulse extends StatefulWidget {
+  final Color color;
+  const _OrbitalPulse({required this.color});
+  @override
+  State<_OrbitalPulse> createState() => _OrbitalPulseState();
+}
+
+class _OrbitalPulseState extends State<_OrbitalPulse> with SingleTickerProviderStateMixin {
+  late AnimationController _ctrl;
+  @override
+  void initState() { super.initState(); _ctrl = AnimationController(vsync: this, duration: const Duration(seconds: 3))..repeat(); }
+  @override
+  void dispose() { _ctrl.dispose(); super.dispose(); }
+  @override
+  Widget build(BuildContext context) {
+    return RotationTransition(
+      turns: _ctrl,
+      child: SizedBox(
+        width: 260,
+        height: 260,
+        child: Stack(
+          children: [
+            Positioned(top: 0, left: 130, child: Container(width: 6, height: 6, decoration: BoxDecoration(shape: BoxShape.circle, color: widget.color, boxShadow: [BoxShadow(color: widget.color, blurRadius: 10)]))),
+          ],
+        ),
+      ),
     );
   }
 }
 
 class DiscoveryPage extends StatelessWidget {
   const DiscoveryPage({super.key});
-
   @override
   Widget build(BuildContext context) {
     final pc = context.watch<PlayerController>();
-    
     return Scaffold(
-      appBar: AppBar(title: const Text('Discover PCs')),
+      backgroundColor: Colors.transparent,
+      appBar: AppBar(title: const Text('NODE DISCOVERY', style: TextStyle(fontSize: 14, letterSpacing: 2, fontWeight: FontWeight.bold)), backgroundColor: Colors.transparent, elevation: 0),
       body: pc.foundServers.isEmpty && !pc.discovering
           ? Center(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  const Icon(Icons.search_off, size: 64, color: Colors.white24),
-                  const SizedBox(height: 16),
-                  const Text('No servers found', style: TextStyle(color: Colors.white38)),
+                  Icon(Icons.radar, size: 64, color: Colors.white.withOpacity(0.05)),
                   const SizedBox(height: 24),
-                  ElevatedButton.icon(
-                    onPressed: () => pc.discoverServers(),
-                    icon: const Icon(Icons.refresh),
-                    label: const Text('Scan Network'),
-                  ),
+                  const Text('SILENCE ON FREQUENCY', style: TextStyle(color: Colors.white24, letterSpacing: 2, fontSize: 12)),
+                  const SizedBox(height: 32),
+                  _glassButton('INITIATE SCAN', () => pc.discoverServers(), Icons.refresh),
                 ],
               ),
             )
           : ListView.builder(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(24),
               itemCount: pc.foundServers.length,
               itemBuilder: (context, i) {
                 final s = pc.foundServers[i];
-                return Card(
-                  margin: const EdgeInsets.only(bottom: 12),
-                  child: ListTile(
-                    leading: const CircleAvatar(child: Icon(Icons.computer)),
-                    title: Text(s.name, style: const TextStyle(fontWeight: FontWeight.bold)),
-                    subtitle: Text('${s.host}:${s.port}'),
-                    trailing: const Icon(Icons.chevron_right),
-                    onTap: () {
-                      pc.setUrl('http://${s.host}:${s.port}/stream.opus');
-                      pc.connectAndPlay();
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(content: Text('Connected to ${s.name}')),
-                      );
-                    },
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 16),
+                  child: _glassCard(
+                    child: ListTile(
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                      title: Text(s.name.toUpperCase(), style: const TextStyle(fontWeight: FontWeight.bold, letterSpacing: 1)),
+                      subtitle: Text('${s.host} • PCM:${s.pcmPort}', style: const TextStyle(color: Colors.white38, fontSize: 11)),
+                      trailing: const Icon(Icons.arrow_forward_ios, size: 14, color: Colors.cyanAccent),
+                      onTap: () { pc.setUrl('http://${s.host}:${s.port}/stream.opus'); pc.connectAndPlay(); },
+                    ),
                   ),
                 );
               },
             ),
-      floatingActionButton: pc.discovering
-          ? null
-          : FloatingActionButton(
-              onPressed: () => pc.discoverServers(),
-              child: const Icon(Icons.refresh),
-            ),
+      floatingActionButton: pc.discovering ? null : FloatingActionButton(onPressed: () => pc.discoverServers(), backgroundColor: Colors.cyanAccent, child: const Icon(Icons.radar, color: Colors.black)),
     );
+  }
+
+  Widget _glassButton(String label, VoidCallback onTap, IconData icon) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+        decoration: BoxDecoration(borderRadius: BorderRadius.circular(30), border: Border.all(color: Colors.cyanAccent.withOpacity(0.3)), color: Colors.cyanAccent.withOpacity(0.05)),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [Icon(icon, size: 18, color: Colors.cyanAccent), const SizedBox(width: 12), Text(label, style: const TextStyle(color: Colors.cyanAccent, fontWeight: FontWeight.bold, letterSpacing: 1.5))]),
+      ),
+    );
+  }
+
+  Widget _glassCard({required Widget child}) {
+    return ClipRRect(borderRadius: BorderRadius.circular(20), child: BackdropFilter(filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10), child: Container(color: Colors.white.withOpacity(0.03), child: child)));
   }
 }
 
 class SettingsPage extends StatelessWidget {
   const SettingsPage({super.key});
-
   @override
   Widget build(BuildContext context) {
     final pc = context.watch<PlayerController>();
-    
     return Scaffold(
-      appBar: AppBar(title: const Text('Settings')),
+      backgroundColor: Colors.transparent,
+      appBar: AppBar(title: const Text('CORE CONFIG', style: TextStyle(fontSize: 14, letterSpacing: 2, fontWeight: FontWeight.bold)), backgroundColor: Colors.transparent, elevation: 0),
       body: ListView(
         padding: const EdgeInsets.all(24),
         children: [
-          _sectionTitle('Streaming'),
-          _buildDropdown<int>(
-            'Target Bitrate',
-            pc.prefBitrate,
-            {128000: '128 kbps', 192000: '192 kbps', 256000: '256 kbps', 320000: '320 kbps'},
-            (v) => pc.setPrefBitrate(v!),
-          ),
-          _buildDropdown<int>(
-            'Frame Size',
-            pc.prefFrameMs,
-            {5: '5 ms', 10: '10 ms', 20: '20 ms'},
-            (v) => pc.setPrefFrameMs(v!),
-          ),
-          const SizedBox(height: 24),
-          _sectionTitle('Performance'),
-          _buildDropdown<int>(
-            'PCM Buffer Preset',
-            pc.pcmBufPreset,
-            {3: 'Ultra (Extreme)', 0: 'Low', 1: 'Normal', 2: 'Stable'},
-            (v) => pc.setPcmBufPreset(v!),
-          ),
+          _sectionHeader('STREAM-LINK'),
+          _glassSetting('BITRATE', pc.prefBitrate, {128000: '128KB', 192000: '192KB', 256000: '256KB', 320000: '320KB'}, (v) => pc.setPrefBitrate(v!)),
+          _glassSetting('LATENCY', pc.prefFrameMs, {5: '5MS', 10: '10MS', 20: '20MS'}, (v) => pc.setPrefFrameMs(v!)),
           const SizedBox(height: 32),
-          FilledButton.icon(
-            onPressed: () => pc.applyServerConfig(),
-            icon: const Icon(Icons.sync_alt),
-            label: const Text('Sync with Server'),
-            style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(56)),
-          ),
+          _sectionHeader('NATIVE-CORE'),
+          _glassSetting('BUFFER', pc.pcmBufPreset, {3: 'ULTRA', 0: 'LOW', 1: 'MID', 2: 'STABLE'}, (v) => pc.setPcmBufPreset(v!)),
+          const SizedBox(height: 48),
+          _glassAction('SYNC CONFIGURATION', () => pc.applyServerConfig(), Icons.sync_alt),
           const SizedBox(height: 16),
-          TextButton(
-            onPressed: () => pc.stop(),
-            child: const Text('Reset All Settings', style: TextStyle(color: Colors.redAccent)),
-          ),
+          _glassAction('TERMINATE ALL', () => pc.stop(), Icons.power_settings_new, color: Colors.redAccent),
         ],
       ),
     );
   }
 
-  Widget _sectionTitle(String text) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 16),
-      child: Text(text, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.cyan)),
+  Widget _sectionHeader(String text) { return Padding(padding: const EdgeInsets.only(bottom: 16, left: 4), child: Text(text, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.cyanAccent, letterSpacing: 2))); }
+
+  Widget _glassSetting<T>(String label, T value, Map<T, String> items, ValueChanged<T?> onChanged) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
+      decoration: BoxDecoration(borderRadius: BorderRadius.circular(15), color: Colors.white.withOpacity(0.03)),
+      child: Row(
+        children: [
+          Text(label, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white38)),
+          const Spacer(),
+          DropdownButton<T>(value: value, underline: const SizedBox(), items: items.entries.map((e) => DropdownMenuItem(value: e.key, child: Text(e.value, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)))).toList(), onChanged: onChanged),
+        ],
+      ),
     );
   }
 
-  Widget _buildDropdown<T>(String label, T value, Map<T, String> items, ValueChanged<T?> onChanged) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 20),
-      child: Row(
-        children: [
-          Text(label),
-          const Spacer(),
-          DropdownButton<T>(
-            value: value,
-            underline: const SizedBox(),
-            items: items.entries.map((e) => DropdownMenuItem(value: e.key, child: Text(e.value))).toList(),
-            onChanged: onChanged,
-          ),
-        ],
+  Widget _glassAction(String label, VoidCallback onTap, IconData icon, {Color color = Colors.cyanAccent}) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        height: 60,
+        decoration: BoxDecoration(borderRadius: BorderRadius.circular(15), border: Border.all(color: color.withOpacity(0.3)), gradient: LinearGradient(colors: [color.withOpacity(0.1), Colors.transparent])),
+        child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [Icon(icon, size: 20, color: color), const SizedBox(width: 12), Text(label, style: TextStyle(color: color, fontWeight: FontWeight.bold, letterSpacing: 1.5))]),
       ),
     );
   }
