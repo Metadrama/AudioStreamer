@@ -24,7 +24,7 @@ android {
         applicationId = "com.example.audio_streamer"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        minSdk = 29
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
@@ -37,6 +37,21 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+
+    buildFeatures {
+        prefab = true
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = File("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+}
+
+dependencies {
+    implementation("google.oboe:oboe:1.9.3")
 }
 
 flutter {

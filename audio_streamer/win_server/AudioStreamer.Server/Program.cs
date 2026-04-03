@@ -53,6 +53,7 @@ builder.Services.AddSingleton(liveConfig);
 builder.Services.AddSingleton<CaptureManager>();
 builder.Services.AddHostedService<AdbReverseService>();
 builder.Services.AddHostedService<PcmTcpServerService>();
+builder.Services.AddHostedService<UdpSenderService>();
 builder.Services.AddHostedService<UdpDiscoveryService>();
 
 var app = builder.Build();

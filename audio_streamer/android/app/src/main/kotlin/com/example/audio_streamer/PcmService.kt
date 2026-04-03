@@ -30,6 +30,8 @@ class PcmService : Service() {
     private var wifiLock: WifiManager.WifiLock? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
+    private val nativeEngine = NativeAudioEngine()
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -44,6 +46,7 @@ class PcmService : Service() {
         Log.i(tag, "start fg host=$host port=$port sr=$sampleRate ch=$channels")
         startForegroundWithNotification()
         acquireLocks()
+        nativeEngine.init()
         startWorker(host, port, sampleRate, channels, bits, targetMs, prefillFrames, queueCapacity)
         return START_STICKY
     }
@@ -103,242 +106,76 @@ class PcmService : Service() {
     private fun startWorker(host: String, port: Int, sampleRate: Int, channels: Int, bits: Int, targetMs: Int, prefillFrames: Int, queueCapacity: Int) {
         stopWorker()
         running.set(true)
+
+        // UDP Receiver Thread
+        Thread {
+            try {
+                val udpSocket = java.net.DatagramSocket(7354)
+                udpSocket.receiveBufferSize = 1024 * 1024
+                val buffer = java.nio.ByteBuffer.allocateDirect(2048)
+                val packet = java.net.DatagramPacket(ByteArray(2048), 2048)
+                
+                while (running.get()) {
+                    udpSocket.receive(packet)
+                    buffer.clear()
+                    buffer.put(packet.data, 0, packet.length)
+                    buffer.flip()
+                    nativeEngine.pushUdpPacket(buffer, packet.length)
+                }
+            } catch (e: Exception) {
+                Log.e(tag, "UDP error: ${e.message}")
+            }
+        }.apply { name = "pcm-udp-receiver"; start() }
+
         worker = Thread {
             while (running.get()) {
                 var socket: Socket? = null
-                var track: AudioTrack? = null
                 try {
                     MainActivity.sendPcmEvent("connecting")
                     socket = Socket()
                     socket.tcpNoDelay = true
-                    socket.keepAlive = true
-                    socket.receiveBufferSize = 256 * 1024
-                    socket.sendBufferSize = 256 * 1024
                     socket.connect(InetSocketAddress(host, port), 1500)
-                    // Use blocking reads for steady pacing; service handles reconnects on failure
-                    try { socket.soTimeout = 0 } catch (_: Throwable) {}
                     val input: InputStream = socket.getInputStream()
 
-                    val channelConfig = if (channels == 1)
-                        AudioFormat.CHANNEL_OUT_MONO else AudioFormat.CHANNEL_OUT_STEREO
-                    val audioFormat = if (bits == 16) AudioFormat.ENCODING_PCM_16BIT else AudioFormat.ENCODING_PCM_8BIT
-                    val minBuf = AudioTrack.getMinBufferSize(sampleRate, channelConfig, audioFormat)
-                    // Ultra-low-latency path: keep device buffer close to targetMs, but never below platform minimum
-                    val targetBytes = sampleRate * channels * (bits / 8) * targetMs / 1000
-                    val desiredBuf = maxOf(minBuf, targetBytes)
+                    nativeEngine.start()
+                    MainActivity.sendPcmEvent("connected")
 
-                    track = if (Build.VERSION.SDK_INT >= 29) {
-                        AudioTrack.Builder()
-                            .setAudioAttributes(
-                                AudioAttributes.Builder()
-                                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                                    .setFlags(AudioAttributes.FLAG_LOW_LATENCY)
-                                    .build()
-                            )
-                            .setAudioFormat(
-                                AudioFormat.Builder()
-                                    .setSampleRate(sampleRate)
-                                    .setEncoding(audioFormat)
-                                    .setChannelMask(channelConfig)
-                                    .build()
-                            )
-                            .setTransferMode(AudioTrack.MODE_STREAM)
-                            .setBufferSizeInBytes(desiredBuf)
-                            .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
-                            .build()
-                    } else {
-                        @Suppress("DEPRECATION")
-                        AudioTrack(
-                            AudioManager.STREAM_MUSIC,
-                            sampleRate,
-                            channelConfig,
-                            audioFormat,
-                            desiredBuf,
-                            AudioTrack.MODE_STREAM
-                        )
-                    }
-                    // Implement jitter buffer with pooled frames + remote sample timestamps to absorb jitter and correct drift
-                    val bytesPerSample = channels * (bits / 8)
-                    val frameBytes = (sampleRate / 100) * bytesPerSample // 10ms frames
-                    val samplesPerFrame = frameBytes / bytesPerSample
-                    val capacity = queueCapacity
-                    val queue = ArrayBlockingQueue<Frame>(capacity)
-                    fun take(timeoutMs: Long): Frame? = queue.poll(timeoutMs, TimeUnit.MILLISECONDS)
+                    val frameBytes = (sampleRate / 100) * channels * (bits / 8)
+                    val headerBuf = java.nio.ByteBuffer.allocate(8).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                    val dataBuf = java.nio.ByteBuffer.allocateDirect(frameBytes)
+                    val channel = java.nio.channels.Channels.newChannel(input)
 
-                    val framePool = ArrayDeque<Frame>(capacity * 2)
-                    val headerBuf = ByteArray(8)
-
-                    fun obtainFrame(): Frame = synchronized(framePool) {
-                        if (framePool.isEmpty()) {
-                            Frame(ByteArray(frameBytes), 0L)
-                        } else {
-                            val f = framePool.removeFirst()
-                            if (f.data.size != frameBytes) {
-                                f.data = ByteArray(frameBytes)
-                            }
-                            f
-                        }
-                    }
-
-                    fun recycleFrame(frame: Frame?) {
-                        if (frame == null) return
-                        if (frame.data.size != frameBytes) return
-                        synchronized(framePool) {
-                            if (framePool.size < capacity * 3) {
-                                framePool.addLast(frame)
-                            }
-                        }
-                    }
-
-                    // Reader loop
-                    val reader = Thread {
-                        try {
-                            try { Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO) } catch (_: Throwable) {}
-                            while (running.get()) {
-                                var headerRead = 0
-                                while (headerRead < headerBuf.size && running.get()) {
-                                    val r = try { input.read(headerBuf, headerRead, headerBuf.size - headerRead) } catch (ste: SocketTimeoutException) { -1 }
-                                    if (r <= 0) throw RuntimeException("socket closed or read timeout")
-                                    headerRead += r
-                                }
-                                if (!running.get()) break
-                                val remoteSamples = readLongLE(headerBuf)
-
-                                val frame = obtainFrame()
-                                frame.remoteSamples = remoteSamples
-                                var off = 0
-                                val buf = frame.data
-                                while (off < frameBytes && running.get()) {
-                                    val r = try { input.read(buf, off, frameBytes - off) } catch (ste: SocketTimeoutException) { -1 }
-                                    if (r <= 0) throw RuntimeException("socket closed or read timeout")
-                                    off += r
-                                }
-                                if (!running.get()) {
-                                    recycleFrame(frame)
-                                    break
-                                }
-                                if (!queue.offer(frame)) {
-                                    val dropped = queue.poll()
-                                    recycleFrame(dropped)
-                                    queue.offer(frame)
-                                }
-                            }
-                        } catch (_: Throwable) {
-                            // exit
-                        }
-                    }.apply { name = "pcm-reader"; priority = Thread.NORM_PRIORITY + 1; isDaemon = true; start() }
-
-                    // Writer loop with prefill, drift correction, and underrun detection
-                    var sentConnected = false
-                    var last: Frame? = null
-                    val prefill = prefillFrames
-                    var okPrefill = 0
-                    while (running.get() && okPrefill < prefill) {
-                        val frame = take(400) ?: break
-                        recycleFrame(last)
-                        last = frame
-                        okPrefill++
-                    }
-                    if (okPrefill == 0 || last == null) throw RuntimeException("no data during prefill")
-
-                    track.play()
-                    var playbackBaseRemote = last!!.remoteSamples
-                    var lastSpeed = 1.0f
-                    var lastSpeedChangeNs = 0L
-                    if (!sentConnected) {
-                        sentConnected = true
-                        MainActivity.sendPcmEvent("connected")
-                    }
-
-                    var emptyPolls = 0
-                    val zeroBuf = ByteArray(frameBytes)
-                    var latestRemote = playbackBaseRemote
                     while (running.get()) {
-                        try { Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO) } catch (_: Throwable) {}
-                        val frame = take(120) ?: last
-                        if (frame == null) continue
-                        if (frame === last) {
-                            emptyPolls++
-                            if (emptyPolls >= 64) throw RuntimeException("pcm underrun timeout")
-                        } else {
-                            emptyPolls = 0
+                        headerBuf.clear()
+                        while (headerBuf.hasRemaining() && running.get()) {
+                            if (channel.read(headerBuf) <= 0) throw RuntimeException("socket closed")
                         }
+                        headerBuf.flip()
+                        val remoteSamples = headerBuf.getLong()
 
-                        // Gap concealment: prefer last-frame repeat over silence to avoid clicks at ultra-low latency
-                        val data = if (frame === last) (last?.data ?: zeroBuf) else frame.data
-                        var off = 0
-                        while (off < data.size && running.get()) {
-                            val remaining = data.size - off
-                            val w = if (Build.VERSION.SDK_INT >= 23) {
-                                track.write(data, off, remaining, AudioTrack.WRITE_BLOCKING)
-                            } else {
-                                track.write(data, off, remaining)
-                            }
-                            if (w < 0) throw RuntimeException("audiotrack write error $w")
-                            off += w
+                        dataBuf.clear()
+                        while (dataBuf.hasRemaining() && running.get()) {
+                            if (channel.read(dataBuf) <= 0) throw RuntimeException("socket closed")
                         }
-
-                        if (frame.remoteSamples < playbackBaseRemote) {
-                            playbackBaseRemote = frame.remoteSamples
-                        }
-                        latestRemote = frame.remoteSamples + samplesPerFrame.toLong()
-                        val baseRemote = playbackBaseRemote
-                        val played = track.playbackHeadPosition.toLong()
-                        val queueSamples = latestRemote - baseRemote - played
-                        val targetSamples = prefill.toLong() * samplesPerFrame.toLong()
-                        // For ultra-low targets (<= ~20 ms), avoid frequent speed changes which can be audible.
-                        val allowSpeedAdjust = prefill > 2
-                        // Wider threshold and smaller adjustment to reduce churn
-                        val threshold = samplesPerFrame.toLong() * 4L // ~4 frames
-                        val desiredSpeed = if (!allowSpeedAdjust) 1.0f else when {
-                            queueSamples - targetSamples > threshold -> 1.005f
-                            queueSamples - targetSamples < -threshold -> 0.995f
-                            else -> 1.0f
-                        }
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && allowSpeedAdjust) {
-                            if (abs(desiredSpeed - lastSpeed) >= 0.005f) {
-                                val now = try { System.nanoTime() } catch (_: Throwable) { 0L }
-                                // Minimum interval between speed changes to add hysteresis (~250 ms)
-                                val okToChange = (now == 0L) || (now - lastSpeedChangeNs > 250_000_000L)
-                                if (okToChange) {
-                                    try {
-                                        val params = track.playbackParams
-                                        if (abs(params.speed - desiredSpeed) >= 0.005f) {
-                                            track.playbackParams = params.setSpeed(desiredSpeed)
-                                        }
-                                        lastSpeed = desiredSpeed
-                                        if (now != 0L) lastSpeedChangeNs = now
-                                    } catch (_: Throwable) {}
-                                }
-                            }
-                        }
-
-                        if (frame !== last) {
-                            recycleFrame(last)
-                            last = frame
-                        }
+                        dataBuf.flip()
+                        
+                        nativeEngine.pushData(remoteSamples, dataBuf, frameBytes)
                     }
                 } catch (t: Throwable) {
                     Log.e(tag, "pcm service error", t)
                     MainActivity.sendPcmEvent("disconnected", t.message)
-                    // brief backoff before reconnect
                     try { Thread.sleep(300) } catch (_: Throwable) {}
                 } finally {
-                    try { /* reader */ } catch (_: Throwable) {}
-                    try { track?.stop() } catch (_: Throwable) {}
-                    try { track?.release() } catch (_: Throwable) {}
+                    nativeEngine.stop()
                     try { socket?.close() } catch (_: Throwable) {}
-                    // Continue loop if still running; stopForeground is handled after loop exits
                 }
             }
-            // exiting worker loop
             stopForeground(STOP_FOREGROUND_REMOVE)
             releaseLocks()
             MainActivity.sendPcmEvent("stopped")
             stopSelf()
         }.apply {
-            name = "pcm-service"
+            name = "pcm-native-service"
             priority = Thread.NORM_PRIORITY + 1
             start()
         }
