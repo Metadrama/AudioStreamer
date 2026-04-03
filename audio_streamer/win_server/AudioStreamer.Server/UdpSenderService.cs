@@ -54,8 +54,8 @@ class UdpSenderService : BackgroundService
         if (capture.WaveFormat.Channels == 1) sampleProvider = new NAudio.Wave.SampleProviders.MonoToStereoSampleProvider(sampleProvider);
         else if (capture.WaveFormat.Channels != 2) sampleProvider = new DownmixToStereoSampleProvider(sampleProvider);
 
-        int samplesPerFrame = 48000 * 10 / 1000; // 10ms
-        int frameBytes = samplesPerFrame * 2 * 2; // 480 * 2ch * 2 bytes
+        int samplesPerFrame = 48000 * 5 / 1000; // 5ms
+        int frameBytes = samplesPerFrame * 2 * 2; // 240 * 2ch * 2 bytes
         var floatBuf = new float[samplesPerFrame * 2];
         var shortBuf = new short[samplesPerFrame * 2];
         var packetBuf = new byte[14 + frameBytes];
@@ -65,7 +65,7 @@ class UdpSenderService : BackgroundService
         long totalSamples = 0;
         
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        var frameDuration = TimeSpan.FromMilliseconds(10);
+        var frameDuration = TimeSpan.FromMilliseconds(5);
         TimeSpan nextDue = TimeSpan.Zero;
 
         while (!ct.IsCancellationRequested)

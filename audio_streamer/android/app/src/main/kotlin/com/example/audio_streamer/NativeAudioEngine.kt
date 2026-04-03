@@ -5,12 +5,14 @@ import java.nio.ByteBuffer
 
 class NativeAudioEngine {
     companion object {
+        var isLoaded = false
         init {
             try {
                 System.loadLibrary("audio_streamer_native")
                 Log.d("NativeAudioEngine", "Native library loaded successfully")
-            } catch (e: Exception) {
-                Log.e("NativeAudioEngine", "Error loading native library: ${e.message}")
+                isLoaded = true
+            } catch (e: Throwable) {
+                Log.e("NativeAudioEngine", "Error loading native library: ${e.message}", e)
             }
         }
     }
@@ -19,12 +21,34 @@ class NativeAudioEngine {
     external fun nativeStart()
     external fun nativeStop()
     external fun nativePushData(remoteSamples: Long, data: ByteBuffer, size: Int)
-
     external fun nativePushUdpPacket(data: ByteBuffer, size: Int)
 
-    fun init() = nativeInit()
-    fun start() = nativeStart()
-    fun stop() = nativeStop()
-    fun pushData(remoteSamples: Long, data: ByteBuffer, size: Int) = nativePushData(remoteSamples, data, size)
-    fun pushUdpPacket(data: ByteBuffer, size: Int) = nativePushUdpPacket(data, size)
+    fun init() {
+        if (!isLoaded) {
+            Log.e("NativeAudioEngine", "Cannot call init: Library not loaded")
+            return
+        }
+        try {
+            nativeInit()
+        } catch (e: Throwable) {
+            Log.e("NativeAudioEngine", "nativeInit failed", e)
+        }
+    }
+
+    fun start() {
+        if (isLoaded) try { nativeStart() } catch (e: Throwable) { Log.e("NativeAudioEngine", "nativeStart failed", e) }
+    }
+
+    fun stop() {
+        if (isLoaded) try { nativeStop() } catch (e: Throwable) { Log.e("NativeAudioEngine", "nativeStop failed", e) }
+    }
+
+    fun pushData(remoteSamples: Long, data: ByteBuffer, size: Int) {
+        if (isLoaded) try { nativePushData(remoteSamples, data, size) } catch (e: Throwable) { Log.e("NativeAudioEngine", "nativePushData failed", e) }
+    }
+
+    fun pushUdpPacket(data: ByteBuffer, size: Int) {
+        if (isLoaded) try { nativePushUdpPacket(data, size) } catch (e: Throwable) { Log.e("NativeAudioEngine", "nativePushUdpPacket failed", e) }
+    }
 }
+

@@ -44,10 +44,18 @@ class PcmService : Service() {
         val prefillFrames = intent?.getIntExtra("prefill", 6) ?: 6
         val queueCapacity = intent?.getIntExtra("capacity", 16) ?: 16
         Log.i(tag, "start fg host=$host port=$port sr=$sampleRate ch=$channels")
-        startForegroundWithNotification()
-        acquireLocks()
-        nativeEngine.init()
-        startWorker(host, port, sampleRate, channels, bits, targetMs, prefillFrames, queueCapacity)
+        
+        try {
+            startForegroundWithNotification()
+            acquireLocks()
+            nativeEngine.init()
+            startWorker(host, port, sampleRate, channels, bits, targetMs, prefillFrames, queueCapacity)
+        } catch (e: Throwable) {
+            Log.e(tag, "Failed to start PcmService", e)
+            MainActivity.sendPcmEvent("error", "Failed to start service: ${e.message}")
+            stopSelf()
+        }
+        
         return START_STICKY
     }
 
@@ -69,8 +77,18 @@ class PcmService : Service() {
             .setContentText("PCM stream")
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setOngoing(true)
+            .apply {
+                if (Build.VERSION.SDK_INT >= 34) {
+                    setCategory(Notification.CATEGORY_SERVICE)
+                }
+            }
             .build()
-        startForeground(1001, notif)
+            
+        if (Build.VERSION.SDK_INT >= 34) {
+            startForeground(1001, notif, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+        } else {
+            startForeground(1001, notif)
+        }
     }
 
     private fun acquireLocks() {

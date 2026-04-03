@@ -79,8 +79,11 @@ void UdpReceiver::attemptFec(uint16_t paritySeq) {
         for (int i = 0; i < 4; i++) {
             uint16_t s = base + i;
             if (s == m) continue;
-            const auto& p = mBuffer[s];
-            for (size_t j = 0; j < recovered.data.size(); j++) {
+            auto it_p = mBuffer.find(s);
+            if (it_p == mBuffer.end()) continue; // Should not happen given missing.size() == 1
+            const auto& p = it_p->second;
+            size_t minLen = std::min(recovered.data.size(), p.data.size());
+            for (size_t j = 0; j < minLen; j++) {
                 recovered.data[j] ^= p.data[j];
             }
         }
