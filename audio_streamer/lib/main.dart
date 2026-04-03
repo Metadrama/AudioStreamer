@@ -433,7 +433,7 @@ class MainApp extends StatelessWidget {
             brightness: Brightness.dark,
             surface: const Color(0xFF121212),
           ),
-          cardTheme: CardTheme(
+          cardTheme: CardThemeData(
             elevation: 0,
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
             color: Colors.white.withOpacity(0.05),
@@ -594,7 +594,7 @@ class HomePage extends StatelessWidget {
             _infoRow(Icons.link, 'Host', pc.url),
             if (pc.usePcm) ...[
               const Divider(height: 32, color: Colors.white10),
-              _infoRow(Icons.buffer, 'Buffer', '${pc.pcmBufPreset == 3 ? "Ultra" : pc.pcmBufPreset == 0 ? "Low" : "Normal"}'),
+              _infoRow(Icons.memory, 'Buffer', '${pc.pcmBufPreset == 3 ? "Ultra" : pc.pcmBufPreset == 0 ? "Low" : "Normal"}'),
             ],
           ],
         ),
