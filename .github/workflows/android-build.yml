@@ -17,6 +17,10 @@ jobs:
       - name: Install NDK
         run: |
           echo "y" | sudo ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "ndk;27.0.12077973"
+      - name: Fix permissions
+        run: |
+          mkdir -p /home/runner/.config/.android
+          sudo chown -R $USER:$USER /home/runner/.config
       - name: Build APK
         working-directory: audio_streamer
         run: flutter build apk --debug
