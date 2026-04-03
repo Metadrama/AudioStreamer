@@ -469,7 +469,7 @@ class HomePage extends StatelessWidget {
               children: [
                 _statItem('HOST', pc.url.split('://').last.split('/').first, Icons.dns_outlined),
                 const Divider(height: 24, color: Colors.white10),
-                _statItem('MODE', pc.usePcm ? 'NATIVE-PCM' : 'OPUS-NET', Icons.Bolt),
+                _statItem('MODE', pc.usePcm ? 'NATIVE-PCM' : 'OPUS-NET', Icons.bolt),
                 const Divider(height: 24, color: Colors.white10),
                 _statItem('JITTER', '${pc.pcmBufPreset == 3 ? "ULTRA" : pc.pcmBufPreset == 0 ? "LOW" : "STABLE"}', Icons.waves),
               ],
