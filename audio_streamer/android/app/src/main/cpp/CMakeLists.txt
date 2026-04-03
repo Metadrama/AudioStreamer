@@ -5,6 +5,7 @@ find_package(oboe REQUIRED CONFIG)
 
 add_library(audio_streamer_native SHARED
     AudioEngine.cpp
+    UdpReceiver.cpp
 )
 
 target_link_libraries(audio_streamer_native
