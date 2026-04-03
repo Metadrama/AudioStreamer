@@ -19,9 +19,9 @@ jobs:
           echo "y" | sudo ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "ndk;27.0.12077973"
       - name: Build APK
         working-directory: audio_streamer
-        run: flutter build apk --release
+        run: flutter build apk --debug
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-release
-          path: audio_streamer/build/app/outputs/flutter-apk/app-release.apk
+          name: app-debug
+          path: audio_streamer/build/app/outputs/flutter-apk/app-debug.apk
