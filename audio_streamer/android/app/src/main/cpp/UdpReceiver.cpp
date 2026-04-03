@@ -27,10 +27,11 @@ void UdpReceiver::pushPacket(const uint8_t* buffer, size_t size) {
     if (!mInitialized) {
         mNextSeq = pkt.seq;
         mInitialized = true;
+        LOGI("JitterBuffer initialized with seq %d", mNextSeq);
     }
 
     // Ignore very old packets (too far before current seq)
-    if (pkt.seq < mNextSeq && (uint16_t)(mNextSeq - pkt.seq) < 1000) return;
+    if (pkt.seq < mNextSeq && (uint16_t)(mNextSeq - pkt.seq) < 30000) return;
 
     mBuffer[pkt.seq] = std::move(pkt);
     

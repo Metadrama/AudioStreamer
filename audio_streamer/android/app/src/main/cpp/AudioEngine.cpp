@@ -84,7 +84,10 @@ static AudioEngine *gAudioEngine = nullptr;
 
 extern "C" {
     JNIEXPORT void JNICALL Java_com_example_audio_streamer_NativeAudioEngine_nativeInit(JNIEnv *env, jobject thiz) {
-        if (gAudioEngine == nullptr) gAudioEngine = new AudioEngine();
+        if (gAudioEngine == nullptr) {
+            gAudioEngine = new AudioEngine();
+            LOGD("Native AudioEngine initialized");
+        }
     }
     JNIEXPORT void JNICALL Java_com_example_audio_streamer_NativeAudioEngine_nativeStart(JNIEnv *env, jobject thiz) {
         if (gAudioEngine) gAudioEngine->start();

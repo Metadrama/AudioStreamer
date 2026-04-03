@@ -109,8 +109,9 @@ class PcmService : Service() {
 
         // UDP Receiver Thread
         Thread {
+            var udpSocket: java.net.DatagramSocket? = null
             try {
-                val udpSocket = java.net.DatagramSocket(7354)
+                udpSocket = java.net.DatagramSocket(7354)
                 udpSocket.receiveBufferSize = 1024 * 1024
                 val buffer = java.nio.ByteBuffer.allocateDirect(2048)
                 val packet = java.net.DatagramPacket(ByteArray(2048), 2048)
@@ -118,12 +119,16 @@ class PcmService : Service() {
                 while (running.get()) {
                     udpSocket.receive(packet)
                     buffer.clear()
-                    buffer.put(packet.data, 0, packet.length)
-                    buffer.flip()
-                    nativeEngine.pushUdpPacket(buffer, packet.length)
+                    if (packet.length <= buffer.capacity()) {
+                        buffer.put(packet.data, 0, packet.length)
+                        buffer.flip()
+                        nativeEngine.pushUdpPacket(buffer, packet.length)
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(tag, "UDP error: ${e.message}")
+            } finally {
+                try { udpSocket?.close() } catch (_: Exception) {}
             }
         }.apply { name = "pcm-udp-receiver"; start() }
 
