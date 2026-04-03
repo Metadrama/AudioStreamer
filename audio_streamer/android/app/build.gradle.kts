@@ -51,7 +51,7 @@ android {
 }
 
 dependencies {
-    implementation("google.oboe:oboe:1.9.3")
+    implementation("com.google.oboe:oboe:1.9.3")
 }
 
 flutter {
